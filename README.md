@@ -1,6 +1,22 @@
 # m3u8ToMp4 - m3u8 转 mp4 工具
 
-一个带图形界面的 m3u8 转 mp4 工具，支持本地文件和 URL 输入。
+一个带图形界面的 m3u8 转 mp4 工具，支持本地文件、文件夹和 URL 输入，内置 FFmpeg 与依赖管理。
+
+## 快速导航
+
+- [功能特性](#功能特性)
+- [快速开始](#快速开始)
+- [截图预览](#截图预览)
+- [设置菜单详解](#设置菜单详解)
+- [打包为 EXE可选](#打包为-exe可选)
+- [常见问题](#常见问题)
+
+## 一眼了解
+
+- 目标用户：希望把 m3u8 快速转换为 mp4 的日常用户
+- 核心优势：本地 UI 操作、批量转换、可视化进度、配置可保存
+- 扩展能力：依赖中心支持一键检测/部署 FFmpeg、`send2trash`、`tkinterdnd2`
+- 适用系统：Windows（已集成 `winget` 自动安装流程）
 
 ---
 
@@ -68,6 +84,22 @@ python main.py
 6. 选择转换预设与重名策略
 7. 可按需启用预览和继续选项
 8. 点击"开始转换"
+
+## 截图预览
+
+> 你可以将真实截图放到 `assets/screenshots/` 目录，并保持以下文件名，README 会自动展示。
+
+### 主界面
+
+![主界面预览](assets/screenshots/main-window.png)
+
+### 设置 - 依赖中心
+
+![依赖中心预览](assets/screenshots/settings-deps.png)
+
+### 转换任务预览
+
+![任务预览](assets/screenshots/task-preview.png)
 
 ---
 
@@ -283,6 +315,12 @@ pip install pyinstaller
 ### 输出位置
 - 生成的 `m3u8ToMp4.exe` 位于 `dist` 目录下
 - 可直接双击运行，无需 Python 环境
+
+### 发布建议（GitHub Releases）
+
+- 在 GitHub 仓库创建新 Release 时，可直接使用 `.github/RELEASE_TEMPLATE.md` 作为说明模板
+- 仓库已提供 `.github/release.yml`，用于自动分类 GitHub 生成的发布说明
+- 建议把 `dist` 目录中的 EXE 与说明文档一并上传到 Release 附件
 
 ---
 
