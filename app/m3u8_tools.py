@@ -58,12 +58,19 @@ def _resolve_uri(base_source: str, uri: str) -> str:
 
 def parse_m3u8(source: str) -> M3U8Parsed:
     text = _read_text(source)
+    raw_lines = text.splitlines()
+    first_non_empty = next((line.strip() for line in raw_lines if line.strip()), "")
+    if first_non_empty.upper() != "#EXTM3U":
+        if first_non_empty.lower().startswith("<!doctype html") or "<html" in first_non_empty.lower():
+            raise ValueError("输入地址返回的是 HTML 页面，不是 m3u8 清单。请使用 .m3u8 直链。")
+        raise ValueError("输入内容不是有效的 m3u8 清单（缺少 #EXTM3U 头）。")
+
     segments: list[str] = []
     encrypted = False
     encryption_method = ""
     key_uri = ""
 
-    for raw in text.splitlines():
+    for raw in raw_lines:
         line = raw.strip()
         if not line:
             continue

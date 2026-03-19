@@ -1,3 +1,4 @@
+import os
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk
@@ -70,7 +71,9 @@ def main() -> None:
         root = tk.Tk()
     root.title("m3u8 转 mp4 转换工具")
     root.geometry("900x620")
-    _mount_scrollable_app(root)
+    app = _mount_scrollable_app(root)
+    if os.environ.get("M3U8_OPEN_HELP_ON_START") == "1":
+        root.after(1000, app.open_help_window)
     root.mainloop()
 
 

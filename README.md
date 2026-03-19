@@ -392,6 +392,48 @@ pip install pyinstaller
 
 ---
 
+## 一键自测（加密 m3u8）
+
+可使用脚本自动生成 AES-128 测试样本，并输出可直接粘贴到 UI 的 URL。
+
+### 仅生成样本与 URL
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "scripts/start_ui_hls_fixture.ps1" -NoServe
+```
+
+### 生成样本并启动本地服务
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "scripts/start_ui_hls_fixture.ps1"
+```
+
+### 一键自测（自动打开 UI）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "scripts/start_ui_hls_fixture.ps1" -OpenUI
+```
+
+说明：`-OpenUI` 会在本地服务启动后自动打开工具窗口；关闭工具窗口后，脚本会自动结束本地服务。
+
+### 仅获取可访问 URL（后台保活服务）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "scripts/start_ui_hls_fixture.ps1" -UrlOnly
+```
+
+说明：`-UrlOnly` 会在验证 URL 可访问后退出脚本，并让本地 HTTP 服务继续在后台运行（会输出 PID 供手动停止）。
+
+### 演示模式（自动打开 UI + 帮助）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "scripts/start_ui_hls_fixture.ps1" -OpenUI -OpenHelp
+```
+
+说明：`-OpenHelp` 依赖 `-OpenUI`，会在程序启动后自动拉起帮助窗口。
+
+---
+
 ## 常见问题
 
 ### FFmpeg 未被检测到

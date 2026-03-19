@@ -163,6 +163,21 @@ class UiHelperTests(unittest.TestCase):
         preview_dir = ConverterApp._preview_temp_dir()
         self.assertEqual(preview_dir.name, "m3u8ToMp4_preview")
 
+    def test_guess_m3u8_from_segment_source_for_http(self) -> None:
+        source = "http://127.0.0.1:8000/enc_hls/index0.ts"
+        guessed = ConverterApp._guess_m3u8_from_segment_source(source)
+        self.assertEqual(guessed, "http://127.0.0.1:8000/enc_hls/index.m3u8")
+
+    def test_guess_m3u8_from_segment_source_for_local_file(self) -> None:
+        source = r"C:\tmp\enc_hls\index0.ts"
+        guessed = ConverterApp._guess_m3u8_from_segment_source(source)
+        self.assertTrue(guessed.endswith("index.m3u8"))
+
+    def test_guess_m3u8_from_segment_source_returns_none_for_playlist(self) -> None:
+        source = "http://127.0.0.1:8000/enc_hls/index.m3u8"
+        guessed = ConverterApp._guess_m3u8_from_segment_source(source)
+        self.assertIsNone(guessed)
+
     def test_load_transcode_templates_parses_valid_json(self) -> None:
         raw = '{"720p":{"resolution":"1280x720","video_bitrate":"1800k"}}'
         data = ConverterApp._load_transcode_templates(raw)

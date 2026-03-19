@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
@@ -988,7 +988,21 @@ class ConverterApp(ttk.Frame):
             return
 
         source = sources[0][0]
-        segment = get_first_segment(source)
+        preview_source = source
+        guessed_playlist = self._guess_m3u8_from_segment_source(source)
+        if guessed_playlist:
+            preview_source = guessed_playlist
+            self._append_log(
+                f"检测到分片地址，预览目标已自动切换为清单：{preview_source}",
+                level="WARNING",
+                task="全局",
+            )
+        try:
+            segment = get_first_segment(preview_source)
+        except Exception as exc:
+            messagebox.showwarning("预览失败", f"无法解析 m3u8：{exc}")
+            self._append_log(f"首片段预览失败：{exc}", level="ERROR", task="全局")
+            return
         if segment is None:
             messagebox.showwarning("预览失败", "当前 m3u8 未找到可预览分片。")
             return
@@ -996,14 +1010,20 @@ class ConverterApp(ttk.Frame):
         ffplay_bin = shutil.which("ffplay")
         if ffplay_bin:
             try:
-                subprocess.Popen([ffplay_bin, "-autoexit", "-t", "8", segment.resolved_uri])
-                self._append_log(f"已启动首分片预览：{segment.resolved_uri}", level="INFO", task="全局")
+                # 对加密流，直接播放分片会失败，优先让 ffplay 打开 m3u8 清单。
+                ffplay_args = [ffplay_bin, "-autoexit", "-t", "8"]
+                source_path = Path(preview_source)
+                if source_path.suffix.lower() == ".m3u8":
+                    ffplay_args.extend(["-allowed_extensions", "ALL"])
+                ffplay_args.append(preview_source)
+                subprocess.Popen(ffplay_args)
+                self._append_log(f"已启动 m3u8 预览：{preview_source}", level="INFO", task="全局")
                 return
             except OSError as exc:
                 self._append_log(f"启动 ffplay 预览失败：{exc}", level="ERROR", task="全局")
 
         # ffplay 不可用时，回退为 ffmpeg 生成 5 秒临时视频。
-        temp_preview = self._build_preview_temp_mp4(source)
+        temp_preview = self._build_preview_temp_mp4(preview_source)
         if temp_preview is not None:
             if self._open_with_system_default(temp_preview):
                 self._append_log(f"已生成并打开临时预览：{temp_preview}", level="INFO", task="全局")
@@ -1017,6 +1037,21 @@ class ConverterApp(ttk.Frame):
             "当前环境未检测到 ffplay，且无法生成临时预览。\n\n"
             f"首分片路径：\n{segment.resolved_uri}",
         )
+
+    @staticmethod
+    def _guess_m3u8_from_segment_source(source: str) -> str | None:
+        parsed = urlparse(source.strip())
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            path = parsed.path or ""
+            if not path.lower().endswith((".ts", ".m4s", ".aac")):
+                return None
+            playlist_path = str(Path(path).with_name("index.m3u8")).replace("\\", "/")
+            return urlunparse((parsed.scheme, parsed.netloc, playlist_path, "", "", ""))
+
+        local_path = Path(source).expanduser()
+        if local_path.suffix.lower() not in {".ts", ".m4s", ".aac"}:
+            return None
+        return str(local_path.with_name("index.m3u8"))
 
     def _build_preview_temp_mp4(self, source: str) -> str | None:
         ffmpeg_bin = self.ffmpeg_var.get().strip() or "ffmpeg"
