@@ -14,7 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.request import Request, urlopen
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
@@ -41,7 +42,7 @@ from app.converter import (
     convert_m3u8_to_mp4,
     deploy_ffmpeg,
 )
-from app.m3u8_tools import check_integrity, get_first_segment
+from app.m3u8_tools import check_integrity, get_first_segment, parse_m3u8
 from app.resume_store import ResumeStore
 
 
@@ -416,6 +417,7 @@ class ConverterApp(ttk.Frame):
         tool_frame.columnconfigure(0, weight=1)
         tool_frame.columnconfigure(1, weight=1)
         tool_frame.columnconfigure(2, weight=1)
+        tool_frame.columnconfigure(3, weight=1)
 
         self.integrity_btn = ttk.Button(tool_frame, text="完整性校验", command=self.run_integrity_check)
         self.integrity_btn.grid(row=0, column=0, sticky="ew", padx=(8, 4), pady=8)
@@ -425,6 +427,9 @@ class ConverterApp(ttk.Frame):
 
         self.cleanup_preview_btn = ttk.Button(tool_frame, text="清理临时预览", command=self.cleanup_preview_temp_files_manually)
         self.cleanup_preview_btn.grid(row=0, column=2, sticky="ew", padx=(4, 8), pady=8)
+
+        self.quick_check_btn = ttk.Button(tool_frame, text="快速自查", command=self.run_quick_self_check)
+        self.quick_check_btn.grid(row=0, column=3, sticky="ew", padx=(4, 8), pady=8)
 
         ttk.Label(self, text="任务预览：").grid(row=10, column=0, sticky="w")
         self.preview_box = scrolledtext.ScrolledText(self, height=7, state=tk.DISABLED)
@@ -863,6 +868,99 @@ class ConverterApp(ttk.Frame):
                 task="全局",
             )
         self._open_integrity_report_window(reports)
+
+    @staticmethod
+    def _check_resource_reachable(uri: str) -> tuple[bool, str]:
+        parsed = urlparse(uri)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            try:
+                request = Request(uri, headers={"User-Agent": "m3u8ToMp4/1.0"})
+                with urlopen(request, timeout=6) as response:  # nosec B310
+                    status = int(getattr(response, "status", 200))
+                    if 200 <= status < 400:
+                        return True, f"HTTP {status}"
+                    return False, f"HTTP {status}"
+            except Exception as exc:
+                return False, str(exc)
+
+        path = Path(uri).expanduser()
+        if path.exists():
+            return True, "本地文件存在"
+        return False, "本地文件不存在"
+
+    @staticmethod
+    def _build_quick_check_report_text(
+        source: str,
+        segment_count: int,
+        encrypted: bool,
+        method: str,
+        key_uri: str,
+        first_segment_uri: str,
+        segment_status: str,
+        key_status: str,
+    ) -> str:
+        return (
+            "快速自查结果\n\n"
+            f"输入源：{source}\n"
+            f"分片数量：{segment_count}\n"
+            f"加密状态：{'是' if encrypted else '否'}\n"
+            f"加密方式：{method or '无'}\n"
+            f"KEY 地址：{key_uri or '无'}\n"
+            f"首分片：{first_segment_uri or '无'}\n"
+            f"首分片可达性：{segment_status}\n"
+            f"KEY 可达性：{key_status}\n"
+        )
+
+    def run_quick_self_check(self) -> None:
+        try:
+            sources = self._collect_sources()
+        except InvalidInputError as exc:
+            messagebox.showwarning("快速自查", str(exc))
+            return
+
+        if not sources:
+            messagebox.showwarning("快速自查", "未找到可检查的输入源。")
+            return
+
+        source = sources[0][0]
+        try:
+            parsed = parse_m3u8(source)
+        except Exception as exc:
+            messagebox.showwarning("快速自查", f"清单解析失败：{exc}")
+            self._append_log(f"快速自查失败：{exc}", level="ERROR", task="全局")
+            return
+
+        first_segment_uri = ""
+        segment_status = "无分片"
+        if parsed.segments:
+            first_segment_uri = parsed.segments[0]
+            first_segment_resolved = (
+                first_segment_uri
+                if self._is_url_source(first_segment_uri)
+                else str((Path(source).expanduser().resolve().parent / first_segment_uri).resolve())
+                if not self._is_url_source(source)
+                else urljoin(source, first_segment_uri)
+            )
+            seg_ok, seg_detail = self._check_resource_reachable(first_segment_resolved)
+            segment_status = f"{'可达' if seg_ok else '不可达'}（{seg_detail}）"
+
+        key_status = "无密钥"
+        if parsed.encrypted and parsed.key_uri:
+            key_ok, key_detail = self._check_resource_reachable(parsed.key_uri)
+            key_status = f"{'可达' if key_ok else '不可达'}（{key_detail}）"
+
+        report = self._build_quick_check_report_text(
+            source=source,
+            segment_count=len(parsed.segments),
+            encrypted=parsed.encrypted,
+            method=parsed.encryption_method,
+            key_uri=parsed.key_uri,
+            first_segment_uri=first_segment_uri,
+            segment_status=segment_status,
+            key_status=key_status,
+        )
+        self._append_log("已完成快速自查。", level="SUCCESS", task="全局")
+        messagebox.showinfo("快速自查", report)
 
     @staticmethod
     def _format_integrity_report_text(reports: list[object]) -> str:
@@ -2231,6 +2329,8 @@ class ConverterApp(ttk.Frame):
             self.preview_segment_btn.configure(state=editable_state)
         if hasattr(self, "cleanup_preview_btn"):
             self.cleanup_preview_btn.configure(state=editable_state)
+        if hasattr(self, "quick_check_btn"):
+            self.quick_check_btn.configure(state=editable_state)
         if hasattr(self, "log_level_box"):
             self.log_level_box.configure(state="disabled" if busy else "readonly")
         if hasattr(self, "log_task_box"):

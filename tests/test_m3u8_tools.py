@@ -58,6 +58,14 @@ class M3U8ToolsTests(unittest.TestCase):
             assert first is not None
             self.assertTrue(first.resolved_uri.endswith("seg0.ts"))
 
+    def test_parse_m3u8_rejects_html_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            html_file = root / "not_playlist.m3u8"
+            html_file.write_text("<!DOCTYPE html>\n<html></html>", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                parse_m3u8(str(html_file))
+
 
 if __name__ == "__main__":
     unittest.main()

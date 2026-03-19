@@ -178,6 +178,22 @@ class UiHelperTests(unittest.TestCase):
         guessed = ConverterApp._guess_m3u8_from_segment_source(source)
         self.assertIsNone(guessed)
 
+    def test_build_quick_check_report_text_contains_core_fields(self) -> None:
+        text = ConverterApp._build_quick_check_report_text(
+            source="http://127.0.0.1:8000/enc_hls/index.m3u8",
+            segment_count=1,
+            encrypted=True,
+            method="AES-128",
+            key_uri="http://127.0.0.1:8000/enc_hls/enc.key",
+            first_segment_uri="index0.ts",
+            segment_status="可达（HTTP 200）",
+            key_status="可达（HTTP 200）",
+        )
+        self.assertIn("输入源", text)
+        self.assertIn("分片数量：1", text)
+        self.assertIn("加密状态：是", text)
+        self.assertIn("KEY 可达性：可达", text)
+
     def test_load_transcode_templates_parses_valid_json(self) -> None:
         raw = '{"720p":{"resolution":"1280x720","video_bitrate":"1800k"}}'
         data = ConverterApp._load_transcode_templates(raw)

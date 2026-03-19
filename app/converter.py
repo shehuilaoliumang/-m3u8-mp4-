@@ -156,6 +156,13 @@ def _build_input_decrypt_flags(decrypt_options: DecryptOptions) -> list[str]:
     return flags
 
 
+def _build_input_runtime_flags(input_source: str, is_local: bool) -> list[str]:
+    # 本地 m3u8 在新版 ffmpeg 中读取 .key 可能被扩展名安全策略拦截。
+    if is_local and Path(input_source).suffix.lower() == ".m3u8":
+        return ["-allowed_extensions", "ALL"]
+    return []
+
+
 def _validate_custom_transcode_options(options: TranscodeOptions) -> TranscodeOptions:
     resolution = options.resolution.strip()
     video_bitrate = options.video_bitrate.strip()
@@ -655,7 +662,10 @@ def convert_m3u8_to_mp4(
     input_source, default_name, is_local = _resolve_input_source(input_file)
     decrypt_opts = decrypt_options or DecryptOptions()
     transcode_opts = transcode_options or TranscodeOptions()
-    input_decrypt_flags = _build_input_decrypt_flags(decrypt_opts)
+    input_flags = [
+        *_build_input_runtime_flags(input_source, is_local),
+        *_build_input_decrypt_flags(decrypt_opts),
+    ]
 
     key_info: M3U8KeyInfo | None = None
     if decrypt_opts.auto_parse_key:
@@ -686,14 +696,14 @@ def convert_m3u8_to_mp4(
     if progress_callback:
         if key_info is not None:
             progress_callback(0.0, f"检测到 AES-128 加密，KEY URL：{key_info.key_uri}")
-        elif input_decrypt_flags:
+        elif any(flag in {"-decryption_key", "-decryption_iv"} for flag in input_flags):
             progress_callback(0.0, "已启用手动 KEY/IV 解密参数")
         else:
             progress_callback(0.0, "准备开始转换...")
 
     copy_result = subprocess.CompletedProcess([], 1, stdout="", stderr="")
     if allow_copy_first:
-        copy_cmd = build_ffmpeg_copy_command(ffmpeg_bin, input_source, output_path, input_decrypt_flags)
+        copy_cmd = build_ffmpeg_copy_command(ffmpeg_bin, input_source, output_path, input_flags)
         copy_result = _run_command_with_progress(
             _with_progress_flags(copy_cmd),
             duration_seconds,
@@ -717,7 +727,7 @@ def convert_m3u8_to_mp4(
             input_source,
             output_path,
             transcode_opts,
-            input_decrypt_flags,
+            input_flags,
         )
     else:
         reencode_cmd = build_ffmpeg_reencode_command(
@@ -726,7 +736,7 @@ def convert_m3u8_to_mp4(
             output_path,
             x264_preset,
             crf,
-            input_decrypt_flags,
+            input_flags,
         )
     reencode_result = _run_command_with_progress(
         _with_progress_flags(reencode_cmd),
