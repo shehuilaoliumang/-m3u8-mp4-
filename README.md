@@ -9,6 +9,7 @@
 - [截图预览](#截图预览)
 - [设置菜单详解](#设置菜单详解)
 - [打包为 EXE可选](#打包为-exe可选)
+- [协作与反馈](#协作与反馈)
 - [常见问题](#常见问题)
 
 ## 一眼了解
@@ -88,6 +89,8 @@ python main.py
 ## 截图预览
 
 > 你可以将真实截图放到 `assets/screenshots/` 目录，并保持以下文件名，README 会自动展示。
+>
+> 若 GitHub 网页未显示图片，请先确认图片文件已提交并推送到远程分支。
 
 ### 主界面
 
@@ -352,6 +355,15 @@ pip install pyinstaller
 - 尝试更换转换预设
 - 检查源 m3u8 文件是否完整
 - 尝试使用"兼容模式"重新转换
+
+---
+
+## 协作与反馈
+
+- 提交 Bug：使用模板 `.github/ISSUE_TEMPLATE/bug_report.yml`
+- 提功能建议：使用模板 `.github/ISSUE_TEMPLATE/feature_request.yml`
+- 发起 PR：自动载入 `.github/pull_request_template.md`
+- 参与贡献流程：参考 `CONTRIBUTING.md`
 
 ---
 

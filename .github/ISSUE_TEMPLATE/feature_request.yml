@@ -1,0 +1,47 @@
+name: "功能建议"
+description: "提出新功能或体验优化建议"
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        欢迎提出想法。建议尽量描述使用场景与价值，便于评估优先级。
+  - type: input
+    id: problem
+    attributes:
+      label: 你遇到的痛点
+      description: "一句话说明当前流程哪里不方便"
+      placeholder: "批量任务很多时，日志定位效率低"
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你的建议方案
+      description: "描述你希望如何改进"
+      placeholder: "希望支持按关键字过滤日志并一键复制失败项"
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 可替代方案
+      description: "如果你考虑过其他方案，也欢迎写在这里"
+  - type: textarea
+    id: benefits
+    attributes:
+      label: 预期收益
+      description: "该功能能为你解决什么问题"
+      placeholder: "提高批量转换排错效率，减少重复操作"
+    validations:
+      required: true
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索过现有 Issues，确认不是重复建议
+          required: true
+

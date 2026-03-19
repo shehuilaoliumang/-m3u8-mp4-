@@ -1,0 +1,6 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用帮助与常见问题
+    url: https://github.com/shehuilaoliumang/-m3u8-mp4-/blob/main/README.md
+    about: 先查看 README 中的使用说明、依赖部署与常见问题
+
