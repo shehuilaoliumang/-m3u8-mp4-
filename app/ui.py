@@ -41,6 +41,7 @@ from app.converter import (
     auto_detect_ffmpeg_path,
     convert_m3u8_to_mp4,
     deploy_ffmpeg,
+    sanitize_ffmpeg_error_text,
 )
 from app.m3u8_tools import check_integrity, get_first_segment, parse_m3u8
 from app.resume_store import ResumeStore
@@ -116,16 +117,63 @@ class ConverterApp(ttk.Frame):
         self.preview_temp_files: set[str] = set()
         self.log_entries: list[LogEntry] = []
         self.log_tasks: set[str] = {"全部任务", "全局"}
+        self._log_render_after_id: str | None = None
+        self._max_log_render_lines = 800
+        self._progress_state_lock = threading.Lock()
+        self._progress_update_scheduled = False
+        self._pending_progress: tuple[float, str] = (0.0, "等待开始")
+        self._ffmpeg_detecting = False
+        self._last_log_filter: tuple[str, str] = ("全部", "全部任务")
+        self._last_log_rendered_count = 0
+        self._help_sections_cache: list[tuple[int, str, str]] | None = None
+        self._help_sections_cache_path = ""
+        self._help_sections_cache_mtime: float | None = None
+        self._help_loading_token = 0
 
         self._build_widgets()
+        self._defer_bootstrap_init()
+
+    def _defer_bootstrap_init(self) -> None:
+        # 将启动阶段拆分到多个 after 周期，降低首帧卡顿与黑屏概率。
+        self.status_var.set("初始化中...")
         self._bind_live_validation()
-        self._setup_drag_drop()
         self._update_folder_option_state(False)
-        self.auto_detect_ffmpeg(show_message=False)
-        self._refresh_drag_runtime_status()
-        self._refresh_dependency_status()
         self._refresh_action_state()
         self.master.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.master.after(0, self._setup_drag_drop)
+        self.master.after(30, self._refresh_drag_runtime_status)
+        self.master.after(60, self._refresh_dependency_status)
+        self.master.after(80, lambda: self.auto_detect_ffmpeg(show_message=False, log_start=False))
+        self.master.after(160, self._preload_help_sections_cache)
+        self.master.after(120, lambda: self.status_var.set("就绪"))
+
+    def _preload_help_sections_cache(self) -> None:
+        readme_path = self._resolve_readme_path()
+        if readme_path is None:
+            return
+
+        try:
+            current_mtime = readme_path.stat().st_mtime
+            if (
+                self._help_sections_cache is not None
+                and self._help_sections_cache_path == str(readme_path)
+                and self._help_sections_cache_mtime == current_mtime
+            ):
+                return
+        except OSError:
+            current_mtime = None
+
+        def worker() -> None:
+            try:
+                readme_text = readme_path.read_text(encoding="utf-8")
+                sections = self._parse_readme_sections(readme_text)
+            except Exception:
+                return
+            self._help_sections_cache = sections
+            self._help_sections_cache_path = str(readme_path)
+            self._help_sections_cache_mtime = current_mtime
+
+        threading.Thread(target=worker, daemon=True).start()
 
     @staticmethod
     def _preset_label(value: str) -> str:
@@ -1901,8 +1949,29 @@ class ConverterApp(ttk.Frame):
             "3. 查看日志了解更多详情"
         )
 
-    def auto_detect_ffmpeg(self, show_message: bool = True) -> None:
+    def auto_detect_ffmpeg(self, show_message: bool = True, log_start: bool = True) -> None:
+        if self._ffmpeg_detecting:
+            return
+        self._ffmpeg_detecting = True
+        self.ffmpeg_hint_var.set("FFmpeg：检测中...")
+        if log_start:
+            self._append_log("正在检测 ffmpeg 路径...", level="DEBUG", task="全局")
+        thread = threading.Thread(
+            target=self._auto_detect_ffmpeg_worker,
+            args=(show_message,),
+            daemon=True,
+        )
+        thread.start()
+
+    def _auto_detect_ffmpeg_worker(self, show_message: bool) -> None:
         detected = auto_detect_ffmpeg_path()
+        try:
+            self.master.after(0, self._on_auto_detect_ffmpeg_done, detected, show_message)
+        except tk.TclError:
+            return
+
+    def _on_auto_detect_ffmpeg_done(self, detected: str | None, show_message: bool) -> None:
+        self._ffmpeg_detecting = False
         if detected:
             self.ffmpeg_var.set(detected)
             self.ffmpeg_hint_var.set("FFmpeg：已自动检测")
@@ -1944,9 +2013,16 @@ class ConverterApp(ttk.Frame):
             self.log_tasks.add(task)
             if hasattr(self, "log_task_box"):
                 self.log_task_box.configure(values=sorted(self.log_tasks, key=lambda x: (x != "全部任务", x)))
-        self._render_log_entries()
+        self._schedule_log_render()
 
     def _on_log_filter_change(self, *_args: object) -> None:
+        if self._log_render_after_id is not None:
+            try:
+                self.master.after_cancel(self._log_render_after_id)
+            except Exception:
+                pass
+            self._log_render_after_id = None
+        self._last_log_rendered_count = 0
         self._render_log_entries()
 
     def _filtered_log_entries(self) -> list[LogEntry]:
@@ -1969,14 +2045,57 @@ class ConverterApp(ttk.Frame):
             if target_task and entry.task != target_task:
                 continue
             filtered.append(entry)
+        if len(filtered) > self._max_log_render_lines:
+            return filtered[-self._max_log_render_lines :]
         return filtered
+
+    def _schedule_log_render(self) -> None:
+        if self._log_render_after_id is not None:
+            return
+        # 合并短时间内大量日志写入，避免 Text 组件频繁整块重绘。
+        self._log_render_after_id = self.master.after(60, self._flush_log_render)
+
+    def _flush_log_render(self) -> None:
+        self._log_render_after_id = None
+        self._render_log_entries()
 
     def _render_log_entries(self) -> None:
         if not hasattr(self, "log_box"):
             return
+        current_filter = (self.log_level_filter_var.get().strip(), self.log_task_filter_var.get().strip())
+        if current_filter != self._last_log_filter:
+            self._last_log_filter = current_filter
+            self._last_log_rendered_count = 0
+
+        can_incremental = (
+            current_filter == ("全部", "全部任务")
+            and self._last_log_rendered_count > 0
+            and len(self.log_entries) <= self._max_log_render_lines
+            and self._last_log_rendered_count <= len(self.log_entries)
+        )
+
+        if can_incremental:
+            new_entries = self.log_entries[self._last_log_rendered_count :]
+            if not new_entries:
+                return
+            self.log_box.configure(state=tk.NORMAL)
+            for entry in new_entries:
+                prefix = self._log_prefix(entry.level)
+                line = f"[{prefix}][{entry.task}] {entry.message}\n"
+                tag = self._log_tag(entry.level)
+                if tag:
+                    self.log_box.insert(tk.END, line, (tag,))
+                else:
+                    self.log_box.insert(tk.END, line)
+            self.log_box.see(tk.END)
+            self.log_box.configure(state=tk.DISABLED)
+            self._last_log_rendered_count = len(self.log_entries)
+            return
+
+        filtered_entries = self._filtered_log_entries()
         self.log_box.configure(state=tk.NORMAL)
         self.log_box.delete("1.0", tk.END)
-        for entry in self._filtered_log_entries():
+        for entry in filtered_entries:
             prefix = self._log_prefix(entry.level)
             line = f"[{prefix}][{entry.task}] {entry.message}\n"
             tag = self._log_tag(entry.level)
@@ -1986,6 +2105,7 @@ class ConverterApp(ttk.Frame):
                 self.log_box.insert(tk.END, line)
         self.log_box.see(tk.END)
         self.log_box.configure(state=tk.DISABLED)
+        self._last_log_rendered_count = len(self.log_entries) if current_filter == ("全部", "全部任务") else 0
 
     def copy_error_logs(self) -> None:
         errors = [f"[{entry.task}] {entry.message}" for entry in self.log_entries if entry.level == "ERROR"]
@@ -2248,9 +2368,6 @@ class ConverterApp(ttk.Frame):
             )
             return
 
-        readme_text = readme_path.read_text(encoding="utf-8")
-        sections = self._parse_readme_sections(readme_text)
-
         help_window = tk.Toplevel(self.master)
         help_window.title("帮助")
         help_window.geometry("980x660")
@@ -2301,9 +2418,69 @@ class ConverterApp(ttk.Frame):
         self.help_cards_container = cards_container
 
         self.help_sections: dict[str, str] = {}
-        self.help_all_sections = sections
+        self.help_all_sections: list[tuple[int, str, str]] = []
 
         tree.bind("<<TreeviewSelect>>", self._on_help_tree_select)
+        self._render_help_cards("帮助", "正在加载帮助文档，请稍候...")
+        self._load_help_sections_async(readme_path)
+
+    def _load_help_sections_async(self, readme_path: Path) -> None:
+        self._help_loading_token += 1
+        token = self._help_loading_token
+        cache_hit = False
+        try:
+            current_mtime = readme_path.stat().st_mtime
+            cache_hit = (
+                self._help_sections_cache is not None
+                and self._help_sections_cache_path == str(readme_path)
+                and self._help_sections_cache_mtime == current_mtime
+            )
+        except OSError:
+            current_mtime = None
+
+        if cache_hit and self._help_sections_cache is not None:
+            self._on_help_sections_loaded(token, self._help_sections_cache, None)
+            return
+
+        def worker() -> None:
+            try:
+                readme_text = readme_path.read_text(encoding="utf-8")
+                sections = self._parse_readme_sections(readme_text)
+                error = None
+            except Exception as exc:
+                sections = []
+                error = str(exc)
+
+            try:
+                self.master.after(0, self._on_help_sections_loaded, token, sections, error, str(readme_path), current_mtime)
+            except tk.TclError:
+                return
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_help_sections_loaded(
+        self,
+        token: int,
+        sections: list[tuple[int, str, str]],
+        error: str | None,
+        path: str = "",
+        mtime: float | None = None,
+    ) -> None:
+        if token != self._help_loading_token:
+            return
+        if not hasattr(self, "help_window") or not self.help_window.winfo_exists():
+            return
+
+        if error is not None:
+            self._render_help_cards("帮助", f"帮助文档加载失败：\n{error}")
+            return
+
+        if path:
+            self._help_sections_cache = sections
+            self._help_sections_cache_path = path
+            self._help_sections_cache_mtime = mtime
+
+        self.help_all_sections = sections
         self._rebuild_help_tree(self.help_all_sections)
 
     def _set_busy(self, busy: bool) -> None:
@@ -2345,6 +2522,21 @@ class ConverterApp(ttk.Frame):
         value = max(0.0, min(100.0, percent))
         self.progress_var.set(value)
         self.progress_text_var.set(f"{int(value)}% - {message}")
+
+    def _queue_progress_update(self, percent: float, message: str) -> None:
+        with self._progress_state_lock:
+            self._pending_progress = (percent, message)
+            if self._progress_update_scheduled:
+                return
+            self._progress_update_scheduled = True
+        # 约 15fps，足够流畅并显著降低主线程 UI 重绘压力。
+        self.master.after(66, self._flush_progress_update)
+
+    def _flush_progress_update(self) -> None:
+        with self._progress_state_lock:
+            percent, message = self._pending_progress
+            self._progress_update_scheduled = False
+        self._update_progress(percent, message)
 
     def _collect_sources(self) -> list[tuple[str, str | None, Path | None]]:
         if self.local_files:
@@ -2591,7 +2783,7 @@ class ConverterApp(ttk.Frame):
                 with progress_lock:
                     progress_map[index] = max(0.0, min(100.0, percent))
                     overall = sum(progress_map.values()) / total
-                self.master.after(0, self._update_progress, overall, f"[{index}/{total}] {message}")
+                self._queue_progress_update(overall, f"[{index}/{total}] {message}")
 
             return callback
 
@@ -2780,6 +2972,7 @@ class ConverterApp(ttk.Frame):
         messagebox.showinfo(msg_title, msg_text)
 
     def _on_error(self, message: str) -> None:
+        message = sanitize_ffmpeg_error_text(message, message)
         self._set_busy(False)
         if "取消" in message:
             self.status_var.set("已取消")
@@ -2839,6 +3032,12 @@ class ConverterApp(ttk.Frame):
         save_config(self.config_model)
 
     def on_close(self) -> None:
+        if self._log_render_after_id is not None:
+            try:
+                self.master.after_cancel(self._log_render_after_id)
+            except Exception:
+                pass
+            self._log_render_after_id = None
         if self.cleanup_preview_temp_on_exit_var.get():
             removed = self._cleanup_preview_temp_files()
             if removed > 0:

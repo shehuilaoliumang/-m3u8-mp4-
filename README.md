@@ -475,6 +475,6 @@ powershell -ExecutionPolicy Bypass -File "scripts/start_ui_hls_fixture.ps1" -Ope
 
 ---
 
-**版本** - 1.10  
+**版本** - 1.2  
 **最后更新** - 2026年3月
 

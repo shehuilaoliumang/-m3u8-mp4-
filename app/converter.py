@@ -75,6 +75,26 @@ class M3U8KeyInfo:
 
 ProgressCallback = Callable[[float, str], None]
 
+_NON_ERROR_PREFIXES = (
+    "ffmpeg version",
+    "ffplay version",
+    "built with",
+    "configuration:",
+    "libav",
+    "input #",
+    "duration:",
+    "stream #",
+    "metadata:",
+    "program ",
+)
+
+_REAL_ERROR_PATTERN = re.compile(
+    r"\b(error|fatal|failed|failure|invalid|unable|denied|refused|not\s+found|timeout|timed\s*out|forbidden|unauthorized)\b",
+    re.IGNORECASE,
+)
+
+_HTTP_ERROR_PATTERN = re.compile(r"\b(?:http\s*)?(?:status\s*)?(4\d\d|5\d\d)\b", re.IGNORECASE)
+
 
 def _normalize_hex_value(value: str, value_name: str) -> str:
     normalized = value.strip().lower()
@@ -385,6 +405,44 @@ def _parse_speed_factor(line: str) -> float | None:
     except ValueError:
         return None
     return value if value > 0 else None
+
+
+def _is_real_error_line(line: str) -> bool:
+    text = line.strip()
+    if not text:
+        return False
+    lower = text.lower()
+    if lower.startswith("[hls @") and " opening " in lower:
+        return False
+    if lower.startswith(_NON_ERROR_PREFIXES):
+        return False
+    if _REAL_ERROR_PATTERN.search(text):
+        return True
+    return bool(_HTTP_ERROR_PATTERN.search(text))
+
+
+def extract_real_error_lines(output_text: str, max_lines: int = 12) -> list[str]:
+    if not output_text:
+        return []
+    picked: list[str] = []
+    seen: set[str] = set()
+    for raw_line in output_text.splitlines():
+        line = raw_line.strip()
+        if not line or line in seen:
+            continue
+        if _is_real_error_line(line):
+            picked.append(line)
+            seen.add(line)
+            if len(picked) >= max_lines:
+                break
+    return picked
+
+
+def sanitize_ffmpeg_error_text(output_text: str, fallback_message: str = "") -> str:
+    lines = extract_real_error_lines(output_text)
+    if lines:
+        return "\n".join(lines)
+    return fallback_message.strip()
 
 
 def _run_command_with_progress(
@@ -717,7 +775,7 @@ def convert_m3u8_to_mp4(
                 progress_callback(100.0, "转换完成")
             return ConvertResult(output_file=output_path, used_fallback=False)
         if not fallback_reencode:
-            raise ConvertFailedError(copy_result.stderr.strip() or "ffmpeg 转换失败。")
+            raise ConvertFailedError(sanitize_ffmpeg_error_text(copy_result.stderr, "ffmpeg 转换失败。"))
         if progress_callback:
             progress_callback(0.0, "流拷贝失败，尝试重编码...")
 
@@ -751,11 +809,14 @@ def convert_m3u8_to_mp4(
             progress_callback(100.0, "转换完成")
         return ConvertResult(output_file=output_path, used_fallback=allow_copy_first)
 
-    details = (
-        "ffmpeg 转换失败。\n"
-        f"流拷贝错误输出：{copy_result.stderr.strip()}\n"
-        f"重编码错误输出：{reencode_result.stderr.strip()}"
-    )
+    copy_error = sanitize_ffmpeg_error_text(copy_result.stderr)
+    reencode_error = sanitize_ffmpeg_error_text(reencode_result.stderr)
+    parts = ["ffmpeg 转换失败。"]
+    if copy_error:
+        parts.append(f"流拷贝：{copy_error}")
+    if reencode_error:
+        parts.append(f"重编码：{reencode_error}")
+    details = "\n".join(parts)
     raise ConvertFailedError(details)
 
 

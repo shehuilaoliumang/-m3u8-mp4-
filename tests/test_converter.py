@@ -20,7 +20,9 @@ from app.converter import (
     build_output_path,
     deploy_ffmpeg,
     ensure_ffmpeg_available,
+    extract_real_error_lines,
     probe_m3u8_key_info,
+    sanitize_ffmpeg_error_text,
     validate_output_dir,
 )
 
@@ -133,6 +135,21 @@ class ConverterTests(unittest.TestCase):
         self.assertEqual(result[-1], "output.mp4")
         self.assertIn("-progress", result)
         self.assertIn("pipe:1", result)
+
+    def test_extract_real_error_lines_filters_ffmpeg_banner_and_keeps_error(self) -> None:
+        text = (
+            "ffplay version 8.1\n"
+            "configuration: --enable-gpl\n"
+            "Input #0, hls, from 'a.m3u8':\n"
+            "[hls @ 000] Opening '0.ts' for reading\n"
+            "http://127.0.0.1:8000/enc_hls/index0.ts: Invalid data found when processing input\n"
+        )
+        lines = extract_real_error_lines(text)
+        self.assertEqual(lines, ["http://127.0.0.1:8000/enc_hls/index0.ts: Invalid data found when processing input"])
+
+    def test_sanitize_ffmpeg_error_text_uses_fallback_when_no_error_line(self) -> None:
+        text = "ffmpeg version 8.1\nInput #0, hls, from 'a.m3u8':"
+        self.assertEqual(sanitize_ffmpeg_error_text(text, "ffmpeg 转换失败。"), "ffmpeg 转换失败。")
 
     def test_seconds_from_timestamp_parses_valid_value(self) -> None:
         seconds = _seconds_from_timestamp("00:01:30.50")
