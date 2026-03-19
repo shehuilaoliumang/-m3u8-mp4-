@@ -29,3 +29,6 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Local verification workspace
+tmp_encrypted_verify/
+
