@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from app.ui import ConverterApp
@@ -137,6 +138,39 @@ class UiHelperTests(unittest.TestCase):
     def test_find_highlight_spans_returns_match_ranges(self) -> None:
         spans = ConverterApp._find_highlight_spans("支持 URL 和 文件", "url")
         self.assertEqual(spans, [(3, 6)])
+
+    def test_format_integrity_report_text_contains_missing_segments(self) -> None:
+        report = SimpleNamespace(
+            source="demo/index.m3u8",
+            encrypted=True,
+            encryption_method="AES-128",
+            key_uri="https://example.com/key.bin",
+            checked_segments=2,
+            total_segments=3,
+            missing_segments=["/tmp/seg2.ts"],
+        )
+        text = ConverterApp._format_integrity_report_text([report])
+        self.assertIn("源：demo/index.m3u8", text)
+        self.assertIn("缺失数量：1", text)
+        self.assertIn("/tmp/seg2.ts", text)
+
+    def test_open_with_system_default_returns_false_on_failure(self) -> None:
+        with mock.patch("subprocess.Popen", side_effect=OSError("boom")):
+            with mock.patch("app.ui.sys.platform", "linux"):
+                self.assertFalse(ConverterApp._open_with_system_default("/tmp/demo.mp4"))
+
+    def test_preview_temp_dir_uses_expected_folder_name(self) -> None:
+        preview_dir = ConverterApp._preview_temp_dir()
+        self.assertEqual(preview_dir.name, "m3u8ToMp4_preview")
+
+    def test_load_transcode_templates_parses_valid_json(self) -> None:
+        raw = '{"720p":{"resolution":"1280x720","video_bitrate":"1800k"}}'
+        data = ConverterApp._load_transcode_templates(raw)
+        self.assertIn("720p", data)
+        self.assertEqual(data["720p"]["resolution"], "1280x720")
+
+    def test_load_transcode_templates_handles_invalid_json(self) -> None:
+        self.assertEqual(ConverterApp._load_transcode_templates("{"), {})
 
 
 if __name__ == "__main__":

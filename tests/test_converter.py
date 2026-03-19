@@ -9,15 +9,18 @@ from app.converter import (
     DeployFailedError,
     FFmpegNotFoundError,
     InvalidInputError,
+    TranscodeOptions,
     _iter_ffmpeg_candidates,
     _resolve_input_source,
     _seconds_from_timestamp,
     _with_progress_flags,
     auto_detect_ffmpeg_path,
+    build_ffmpeg_custom_command,
     build_ffmpeg_copy_command,
     build_output_path,
     deploy_ffmpeg,
     ensure_ffmpeg_available,
+    probe_m3u8_key_info,
     validate_output_dir,
 )
 
@@ -47,6 +50,18 @@ class ConverterTests(unittest.TestCase):
             output = build_output_path("video", tmp_path, output_name="my_output")
             self.assertEqual(output.name, "my_output.mp4")
 
+    def test_build_output_path_supports_mov_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output = build_output_path("video", tmp_path, output_format="mov")
+            self.assertEqual(output.name, "video.mov")
+
+    def test_build_output_path_rejects_unknown_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            with self.assertRaises(InvalidInputError):
+                build_output_path("video", tmp_path, output_format="mkv")
+
     def test_build_output_path_skip_strategy_returns_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -59,6 +74,34 @@ class ConverterTests(unittest.TestCase):
         self.assertIn("-c", cmd)
         self.assertIn("copy", cmd)
         self.assertIn("-bsf:a", cmd)
+
+    def test_build_ffmpeg_custom_command_includes_custom_options(self) -> None:
+        cmd = build_ffmpeg_custom_command(
+            "ffmpeg",
+            "input.m3u8",
+            Path("output.mp4"),
+            TranscodeOptions(
+                mode="custom",
+                resolution="1280x720",
+                video_bitrate="1800k",
+                fps="30",
+                audio_sample_rate="44100",
+                audio_bitrate="128k",
+            ),
+        )
+        self.assertIn("-vf", cmd)
+        self.assertIn("scale=1280x720", cmd)
+        self.assertIn("-b:v", cmd)
+        self.assertIn("1800k", cmd)
+
+    def test_build_ffmpeg_custom_command_rejects_bad_resolution(self) -> None:
+        with self.assertRaises(InvalidInputError):
+            build_ffmpeg_custom_command(
+                "ffmpeg",
+                "input.m3u8",
+                Path("output.mp4"),
+                TranscodeOptions(mode="custom", resolution="bad"),
+            )
 
     def test_validate_output_dir_rejects_invalid_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -100,6 +143,22 @@ class ConverterTests(unittest.TestCase):
         self.assertEqual(source, "https://example.com/path/test.m3u8")
         self.assertEqual(stem, "test")
         self.assertFalse(is_local)
+
+    def test_probe_m3u8_key_info_parses_local_playlist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            playlist = Path(tmp) / "index.m3u8"
+            playlist.write_text(
+                "#EXTM3U\n"
+                "#EXT-X-KEY:METHOD=AES-128,URI=\"enc.key\",IV=0x00000000000000000000000000000001\n"
+                "#EXTINF:10,\n"
+                "seg.ts\n",
+                encoding="utf-8",
+            )
+            key_info = probe_m3u8_key_info(str(playlist))
+            self.assertIsNotNone(key_info)
+            assert key_info is not None
+            self.assertEqual(key_info.method, "AES-128")
+            self.assertTrue(key_info.key_uri.endswith("enc.key"))
 
     def test_deploy_ffmpeg_raises_when_winget_missing(self) -> None:
         with mock.patch("shutil.which", return_value=None):

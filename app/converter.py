@@ -3,11 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 from typing import Callable, Sequence
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 
 class ConverterError(Exception):
@@ -47,7 +49,139 @@ class DeployResult:
     message: str
 
 
+@dataclass(frozen=True)
+class DecryptOptions:
+    auto_parse_key: bool = True
+    manual_key_hex: str = ""
+    manual_iv_hex: str = ""
+
+
+@dataclass(frozen=True)
+class TranscodeOptions:
+    mode: str = "preset"
+    resolution: str = ""
+    video_bitrate: str = ""
+    fps: str = ""
+    audio_sample_rate: str = ""
+    audio_bitrate: str = ""
+
+
+@dataclass(frozen=True)
+class M3U8KeyInfo:
+    method: str
+    key_uri: str
+    iv: str
+
+
 ProgressCallback = Callable[[float, str], None]
+
+
+def _normalize_hex_value(value: str, value_name: str) -> str:
+    normalized = value.strip().lower()
+    if not normalized:
+        return ""
+    if normalized.startswith("0x"):
+        normalized = normalized[2:]
+    if not re.fullmatch(r"[0-9a-f]+", normalized):
+        raise InvalidInputError(f"{value_name} 必须是十六进制字符串。")
+    return normalized
+
+
+def _normalize_manual_key_hex(value: str) -> str:
+    normalized = _normalize_hex_value(value, "KEY")
+    if normalized and len(normalized) != 32:
+        raise InvalidInputError("KEY 必须是 16 字节（32 位十六进制）。")
+    return normalized
+
+
+def _normalize_manual_iv_hex(value: str) -> str:
+    normalized = _normalize_hex_value(value, "IV")
+    if normalized and len(normalized) != 32:
+        raise InvalidInputError("IV 必须是 16 字节（32 位十六进制）。")
+    return normalized
+
+
+def _parse_key_attributes(line: str) -> dict[str, str]:
+    attributes: dict[str, str] = {}
+    for key, quoted_value, raw_value in re.findall(r'([A-Z0-9-]+)=(?:"([^"]*)"|([^,]+))', line):
+        attributes[key] = quoted_value if quoted_value != "" else raw_value.strip()
+    return attributes
+
+
+def _resolve_key_uri(input_source: str, key_uri: str) -> str:
+    if _is_http_source(key_uri):
+        return key_uri
+    if _is_http_source(input_source):
+        from urllib.parse import urljoin
+
+        return urljoin(input_source, key_uri)
+    return str((Path(input_source).parent / key_uri).resolve())
+
+
+def probe_m3u8_key_info(input_source: str) -> M3U8KeyInfo | None:
+    text = ""
+    if _is_http_source(input_source):
+        request = Request(input_source, headers={"User-Agent": "m3u8ToMp4/1.0"})
+        with urlopen(request, timeout=8) as response:  # nosec B310
+            text = response.read().decode("utf-8", errors="replace")
+    else:
+        source_path = Path(input_source)
+        if source_path.is_file():
+            text = source_path.read_text(encoding="utf-8", errors="replace")
+
+    if not text:
+        return None
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("#EXT-X-KEY"):
+            continue
+        attributes = _parse_key_attributes(line)
+        method = attributes.get("METHOD", "").strip().upper()
+        key_uri = attributes.get("URI", "").strip()
+        iv = attributes.get("IV", "").strip()
+        if method == "AES-128" and key_uri:
+            return M3U8KeyInfo(method=method, key_uri=_resolve_key_uri(input_source, key_uri), iv=iv)
+    return None
+
+
+def _build_input_decrypt_flags(decrypt_options: DecryptOptions) -> list[str]:
+    manual_key = _normalize_manual_key_hex(decrypt_options.manual_key_hex)
+    manual_iv = _normalize_manual_iv_hex(decrypt_options.manual_iv_hex)
+    flags: list[str] = []
+    if manual_key:
+        flags.extend(["-decryption_key", manual_key])
+    if manual_iv:
+        flags.extend(["-decryption_iv", manual_iv])
+    return flags
+
+
+def _validate_custom_transcode_options(options: TranscodeOptions) -> TranscodeOptions:
+    resolution = options.resolution.strip()
+    video_bitrate = options.video_bitrate.strip()
+    fps = options.fps.strip()
+    audio_sample_rate = options.audio_sample_rate.strip()
+    audio_bitrate = options.audio_bitrate.strip()
+
+    if resolution and not re.fullmatch(r"\d{2,5}x\d{2,5}", resolution):
+        raise InvalidInputError("分辨率格式应为 宽x高，例如 1920x1080。")
+    if video_bitrate and not re.fullmatch(r"\d+(?:\.\d+)?[kKmM]?", video_bitrate):
+        raise InvalidInputError("视频码率格式无效，例如 2500k 或 3M。")
+    if fps and not re.fullmatch(r"\d+(?:\.\d+)?", fps):
+        raise InvalidInputError("帧率格式无效，例如 30 或 29.97。")
+    if audio_sample_rate and not re.fullmatch(r"\d{4,6}", audio_sample_rate):
+        raise InvalidInputError("音频采样率格式无效，例如 44100 或 48000。")
+    if audio_bitrate and not re.fullmatch(r"\d+(?:\.\d+)?[kKmM]?", audio_bitrate):
+        raise InvalidInputError("音频码率格式无效，例如 128k。")
+
+    return TranscodeOptions(
+        mode=options.mode,
+        resolution=resolution,
+        video_bitrate=video_bitrate,
+        fps=fps,
+        audio_sample_rate=audio_sample_rate,
+        audio_bitrate=audio_bitrate,
+    )
 
 
 def _iter_ffmpeg_candidates() -> list[Path]:
@@ -112,7 +246,7 @@ def ensure_ffmpeg_available(ffmpeg_bin: str = "ffmpeg") -> str:
     if custom_path.is_file():
         return str(custom_path.resolve())
 
-    resolved = shutil.which(f"{ffmpeg_bin}")
+    resolved = shutil.which(str(ffmpeg_bin))
     if resolved:
         return resolved
 
@@ -214,6 +348,38 @@ def _with_progress_flags(command: Sequence[str]) -> list[str]:
     ]
 
 
+def _format_bytes(size_value: int) -> str:
+    size = float(size_value)
+    units = ["B", "KB", "MB", "GB", "TB"]
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.1f}{unit}" if unit != "B" else f"{int(size)}B"
+        size /= 1024
+    return f"{size_value}B"
+
+
+def _format_eta(seconds_value: float | None) -> str:
+    if seconds_value is None or seconds_value < 0:
+        return "--:--"
+    total = int(seconds_value)
+    hours, rem = divmod(total, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def _parse_speed_factor(line: str) -> float | None:
+    if not line.startswith("speed="):
+        return None
+    raw = line.split("=", 1)[1].strip().lower().rstrip("x")
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
 def _run_command_with_progress(
     command: Sequence[str],
     duration_seconds: float | None,
@@ -231,6 +397,8 @@ def _run_command_with_progress(
 
     output_lines: list[str] = []
     processed_seconds = 0.0
+    total_size_bytes = 0
+    speed_factor: float | None = None
 
     if process.stdout is not None:
         for raw_line in process.stdout:
@@ -264,6 +432,13 @@ def _run_command_with_progress(
                 if parsed is None:
                     continue
                 processed_seconds = parsed
+            elif line.startswith("total_size="):
+                try:
+                    total_size_bytes = int(line.split("=", 1)[1])
+                except ValueError:
+                    continue
+            elif line.startswith("speed="):
+                speed_factor = _parse_speed_factor(line)
             elif line == "progress=end":
                 progress_callback(100.0, "转换完成，正在收尾...")
                 continue
@@ -272,9 +447,30 @@ def _run_command_with_progress(
 
             if duration_seconds and duration_seconds > 0:
                 percent = min(99.0, processed_seconds / duration_seconds * 100)
-                progress_callback(percent, f"已处理 {processed_seconds:.1f}s / {duration_seconds:.1f}s")
+                remain_seconds = max(0.0, duration_seconds - processed_seconds)
+                eta = remain_seconds / speed_factor if speed_factor and speed_factor > 0 else None
+                progress_callback(
+                    percent,
+                    " | ".join(
+                        [
+                            f"已处理 {processed_seconds:.1f}s/{duration_seconds:.1f}s",
+                            f"速度 {speed_factor:.2f}x" if speed_factor else "速度 --",
+                            f"剩余 {_format_eta(eta)}",
+                            f"已输出 {_format_bytes(total_size_bytes)}",
+                        ]
+                    ),
+                )
             else:
-                progress_callback(0.0, f"已处理 {processed_seconds:.1f}s")
+                progress_callback(
+                    0.0,
+                    " | ".join(
+                        [
+                            f"已处理 {processed_seconds:.1f}s",
+                            f"速度 {speed_factor:.2f}x" if speed_factor else "速度 --",
+                            f"已输出 {_format_bytes(total_size_bytes)}",
+                        ]
+                    ),
+                )
 
     return_code = process.wait()
     stdout_text = "\n".join(output_lines)
@@ -305,15 +501,24 @@ def _normalize_output_name(output_name: str | None) -> str | None:
     return name_without_suffix
 
 
+def _normalize_output_format(output_format: str) -> str:
+    normalized = output_format.strip().lower().lstrip(".")
+    if normalized not in {"mp4", "mov", "avi"}:
+        raise InvalidInputError("输出格式仅支持 mp4 / mov / avi。")
+    return normalized
+
+
 def build_output_path(
     input_path: Path | str,
     output_dir: Path,
     output_name: str | None = None,
     conflict_strategy: str = "auto_rename",
+    output_format: str = "mp4",
 ) -> Path | None:
+    extension = _normalize_output_format(output_format)
     default_name = input_path.stem if isinstance(input_path, Path) else Path(input_path).stem
     base_name = _normalize_output_name(output_name) or default_name
-    candidate = output_dir / f"{base_name}.mp4"
+    candidate = output_dir / f"{base_name}.{extension}"
 
     if conflict_strategy == "overwrite":
         return candidate
@@ -326,16 +531,23 @@ def build_output_path(
 
     index = 1
     while True:
-        candidate = output_dir / f"{base_name}_{index}.mp4"
+        candidate = output_dir / f"{base_name}_{index}.{extension}"
         if not candidate.exists():
             return candidate
         index += 1
 
 
-def build_ffmpeg_copy_command(ffmpeg_bin: str, input_source: str, output_path: Path) -> list[str]:
+def build_ffmpeg_copy_command(
+    ffmpeg_bin: str,
+    input_source: str,
+    output_path: Path,
+    input_options: Sequence[str] | None = None,
+) -> list[str]:
+    in_opts = list(input_options or [])
     return [
         ffmpeg_bin,
         "-y",
+        *in_opts,
         "-i",
         input_source,
         "-c",
@@ -352,10 +564,13 @@ def build_ffmpeg_reencode_command(
     output_path: Path,
     x264_preset: str,
     crf: str,
+    input_options: Sequence[str] | None = None,
 ) -> list[str]:
+    in_opts = list(input_options or [])
     return [
         ffmpeg_bin,
         "-y",
+        *in_opts,
         "-i",
         input_source,
         "-c:v",
@@ -370,6 +585,44 @@ def build_ffmpeg_reencode_command(
         "192k",
         str(output_path),
     ]
+
+
+def build_ffmpeg_custom_command(
+    ffmpeg_bin: str,
+    input_source: str,
+    output_path: Path,
+    options: TranscodeOptions,
+    input_options: Sequence[str] | None = None,
+) -> list[str]:
+    custom = _validate_custom_transcode_options(options)
+    in_opts = list(input_options or [])
+    command = [
+        ffmpeg_bin,
+        "-y",
+        *in_opts,
+        "-i",
+        input_source,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "23",
+        "-c:a",
+        "aac",
+        "-b:a",
+        custom.audio_bitrate or "192k",
+    ]
+    if custom.resolution:
+        command.extend(["-vf", f"scale={custom.resolution}"])
+    if custom.video_bitrate:
+        command.extend(["-b:v", custom.video_bitrate])
+    if custom.fps:
+        command.extend(["-r", custom.fps])
+    if custom.audio_sample_rate:
+        command.extend(["-ar", custom.audio_sample_rate])
+    command.append(str(output_path))
+    return command
 
 
 def _resolve_preset(preset: str) -> tuple[str, str, bool]:
@@ -393,24 +646,54 @@ def convert_m3u8_to_mp4(
     preset: str = "fast_copy",
     conflict_strategy: str = "auto_rename",
     cancel_event: object | None = None,
+    decrypt_options: DecryptOptions | None = None,
+    transcode_options: TranscodeOptions | None = None,
+    output_format: str = "mp4",
 ) -> ConvertResult:
     ffmpeg_bin = ensure_ffmpeg_available(ffmpeg_bin)
     output_folder = validate_output_dir(output_dir)
     input_source, default_name, is_local = _resolve_input_source(input_file)
-    output_path = build_output_path(default_name, output_folder, output_name, conflict_strategy)
+    decrypt_opts = decrypt_options or DecryptOptions()
+    transcode_opts = transcode_options or TranscodeOptions()
+    input_decrypt_flags = _build_input_decrypt_flags(decrypt_opts)
+
+    key_info: M3U8KeyInfo | None = None
+    if decrypt_opts.auto_parse_key:
+        try:
+            key_info = probe_m3u8_key_info(input_source)
+        except Exception:
+            key_info = None
+
+    normalized_output_format = _normalize_output_format(output_format)
+    output_path = build_output_path(
+        default_name,
+        output_folder,
+        output_name,
+        conflict_strategy,
+        normalized_output_format,
+    )
 
     if output_path is None:
-        return ConvertResult(output_file=output_folder / f"{default_name}.mp4", used_fallback=False, skipped=True)
+        return ConvertResult(
+            output_file=output_folder / f"{default_name}.{normalized_output_format}",
+            used_fallback=False,
+            skipped=True,
+        )
 
     x264_preset, crf, allow_copy_first = _resolve_preset(preset)
     duration_seconds = _probe_duration_seconds(ffmpeg_bin, input_source, is_local)
 
     if progress_callback:
-        progress_callback(0.0, "准备开始转换...")
+        if key_info is not None:
+            progress_callback(0.0, f"检测到 AES-128 加密，KEY URL：{key_info.key_uri}")
+        elif input_decrypt_flags:
+            progress_callback(0.0, "已启用手动 KEY/IV 解密参数")
+        else:
+            progress_callback(0.0, "准备开始转换...")
 
     copy_result = subprocess.CompletedProcess([], 1, stdout="", stderr="")
     if allow_copy_first:
-        copy_cmd = build_ffmpeg_copy_command(ffmpeg_bin, input_source, output_path)
+        copy_cmd = build_ffmpeg_copy_command(ffmpeg_bin, input_source, output_path, input_decrypt_flags)
         copy_result = _run_command_with_progress(
             _with_progress_flags(copy_cmd),
             duration_seconds,
@@ -428,7 +711,23 @@ def convert_m3u8_to_mp4(
         if progress_callback:
             progress_callback(0.0, "流拷贝失败，尝试重编码...")
 
-    reencode_cmd = build_ffmpeg_reencode_command(ffmpeg_bin, input_source, output_path, x264_preset, crf)
+    if transcode_opts.mode == "custom":
+        reencode_cmd = build_ffmpeg_custom_command(
+            ffmpeg_bin,
+            input_source,
+            output_path,
+            transcode_opts,
+            input_decrypt_flags,
+        )
+    else:
+        reencode_cmd = build_ffmpeg_reencode_command(
+            ffmpeg_bin,
+            input_source,
+            output_path,
+            x264_preset,
+            crf,
+            input_decrypt_flags,
+        )
     reencode_result = _run_command_with_progress(
         _with_progress_flags(reencode_cmd),
         duration_seconds,
@@ -450,23 +749,62 @@ def convert_m3u8_to_mp4(
     raise ConvertFailedError(details)
 
 
-def deploy_ffmpeg() -> DeployResult:
-    winget_path = shutil.which("winget")
-    if not winget_path:
-        raise DeployFailedError("未检测到 winget，无法一键部署。请手动安装 ffmpeg。")
-
-    command = [
-        winget_path,
-        "install",
-        "--id",
-        "Gyan.FFmpeg",
-        "-e",
-        "--accept-source-agreements",
-        "--accept-package-agreements",
-    ]
+def _run_install_command(command: list[str], hint: str) -> DeployResult:
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         details = result.stderr.strip() or result.stdout.strip() or "未知错误"
-        raise DeployFailedError(f"ffmpeg 一键部署失败：{details}")
-
+        raise DeployFailedError(f"ffmpeg 一键部署失败：{details}\n建议：{hint}")
     return DeployResult(success=True, message="ffmpeg 已完成安装，请在设置中重新检测路径。")
+
+
+def deploy_ffmpeg() -> DeployResult:
+    platform = sys.platform.lower()
+
+    if platform.startswith("win"):
+        winget_path = shutil.which("winget")
+        if not winget_path:
+            raise DeployFailedError("未检测到 winget，无法一键部署。请手动安装 ffmpeg。")
+        return _run_install_command(
+            [
+                str(winget_path),
+                "install",
+                "--id",
+                "Gyan.FFmpeg",
+                "-e",
+                "--accept-source-agreements",
+                "--accept-package-agreements",
+            ],
+            "请确认 winget 可用，或在设置中手动指定 ffmpeg 路径。",
+        )
+
+    if platform == "darwin":
+        brew_path = shutil.which("brew")
+        if not brew_path:
+            raise DeployFailedError("未检测到 brew。请先安装 Homebrew，再执行一键部署。")
+        return _run_install_command(
+            [str(brew_path), "install", "ffmpeg"],
+            "请确认 Homebrew 可用并有安装权限。",
+        )
+
+    if platform.startswith("linux"):
+        apt_path = shutil.which("apt-get")
+        dnf_path = shutil.which("dnf")
+        yum_path = shutil.which("yum")
+        if apt_path:
+            return _run_install_command(
+                [str(apt_path), "install", "-y", "ffmpeg"],
+                "若提示权限不足，请在终端使用 sudo apt-get install -y ffmpeg。",
+            )
+        if dnf_path:
+            return _run_install_command(
+                [str(dnf_path), "install", "-y", "ffmpeg"],
+                "若提示权限不足，请在终端使用 sudo dnf install -y ffmpeg。",
+            )
+        if yum_path:
+            return _run_install_command(
+                [str(yum_path), "install", "-y", "ffmpeg"],
+                "若提示权限不足，请在终端使用 sudo yum install -y ffmpeg。",
+            )
+        raise DeployFailedError("未检测到 apt-get/dnf/yum，无法自动安装 ffmpeg。")
+
+    raise DeployFailedError(f"暂不支持当前平台自动安装：{sys.platform}")
