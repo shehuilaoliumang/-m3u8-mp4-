@@ -9,7 +9,7 @@
 ## 详细说明
 
 - 完整更新日志：[`RELEASE_v1.3.md`](./RELEASE_v1.3.md)
-- GitHub 网页查看：`https://github.com/shehuilaoliumang/-m3u8-mp4-/blob/main/RELEASE_v1.3.md`
+- GitHub 网页查看：`https://github.com/shehuilaoliumang/-m3u8-mp4-/blob/main/docs/releases/RELEASE_v1.3.md`
 
 ## 升级建议
 

@@ -61,7 +61,11 @@ try {
         Copy-Item -Path $readmePath -Destination (Join-Path $releaseDir "README.md") -Force
     }
 
-    $latestReleaseNote = Get-ChildItem -Path $projectRoot -Filter "RELEASE_v*.short.md" -File |
+    $releaseNotesDir = Join-Path $projectRoot "docs\releases"
+    if (-not (Test-Path $releaseNotesDir)) {
+        $releaseNotesDir = $projectRoot
+    }
+    $latestReleaseNote = Get-ChildItem -Path $releaseNotesDir -Filter "RELEASE_v*.short.md" -File |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
     if ($latestReleaseNote) {

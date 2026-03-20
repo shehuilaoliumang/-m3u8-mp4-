@@ -385,7 +385,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_exe.ps1
 - 会自动整理发布目录 `release`，包含以下文件：
   - `m3u8ToMp4.exe`
   - `README.md`
-  - 最新的 `RELEASE_v*.short.md`
+  - 最新的 `docs/releases/RELEASE_v*.short.md`
   - `BUILD_INFO.txt`
 - 可直接双击运行，无需 Python 环境
 
