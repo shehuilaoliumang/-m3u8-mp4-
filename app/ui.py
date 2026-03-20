@@ -109,6 +109,7 @@ class ConverterApp(ttk.Frame):
         self.dependency_status_var = tk.StringVar(value="依赖状态：检测中...")
         self.drag_runtime_status_var = tk.StringVar(value="拖放状态：检测中...")
         self.delete_scope_status_var = tk.StringVar(value="删除范围：检测中...")
+        self.resume_persist_status_var = tk.StringVar(value="断点记录：检测中...")
         self.progress_text_var = tk.StringVar(value="等待开始")
         self.progress_var = tk.DoubleVar(value=0.0)
         self.cleanup_progress_text_var = tk.StringVar(value="清理进度：等待开始")
@@ -154,6 +155,7 @@ class ConverterApp(ttk.Frame):
         self._update_folder_option_state(False)
         self._refresh_action_state()
         self._refresh_delete_scope_status()
+        self._refresh_resume_persist_status()
         self.master.protocol("WM_DELETE_WINDOW", self.on_close)
         self.master.after(0, self._setup_drag_drop)
         self.master.after(30, self._refresh_drag_runtime_status)
@@ -551,7 +553,7 @@ class ConverterApp(ttk.Frame):
         settings_menu.add_checkbutton(
             label="断点续传写入 JSON（输出目录）",
             variable=self.persist_resume_json_var,
-            command=self._save_config,
+            command=lambda: (self._save_config(), self._refresh_resume_persist_status()),
         )
         settings_menu.add_separator()
         settings_menu.add_command(label="加密解密设置", command=self.open_decrypt_settings)
@@ -662,7 +664,7 @@ class ConverterApp(ttk.Frame):
         self.resume_check = self._make_stateful_classic_checkbutton(
             base_text="断点续传（任务级）",
             variable=self.enable_resume_var,
-            command=self._save_config,
+            command=lambda: (self._save_config(), self._refresh_resume_persist_status()),
         )
         self.resume_check.grid(row=7, column=3, sticky="w", pady=(0, 8))
 
@@ -775,6 +777,7 @@ class ConverterApp(ttk.Frame):
         ttk.Label(self, textvariable=self.dependency_status_var).grid(row=18, column=2, columnspan=2, sticky="e")
         ttk.Label(self, textvariable=self.drag_runtime_status_var).grid(row=19, column=0, columnspan=2, sticky="w")
         ttk.Label(self, textvariable=self.delete_scope_status_var).grid(row=19, column=2, columnspan=2, sticky="e")
+        ttk.Label(self, textvariable=self.resume_persist_status_var).grid(row=20, column=0, columnspan=2, sticky="w")
 
     def _make_classic_checkbutton(self, **kwargs: object) -> tk.Checkbutton:
         check = tk.Checkbutton(self, anchor="w", indicatoron=True, takefocus=True, **kwargs)
@@ -1200,6 +1203,15 @@ class ConverterApp(ttk.Frame):
 
     def _refresh_delete_scope_status(self) -> None:
         self.delete_scope_status_var.set(f"删除范围：{self._delete_scope_label()}")
+
+    def _refresh_resume_persist_status(self) -> None:
+        if not self.enable_resume_var.get():
+            self.resume_persist_status_var.set("断点记录：已关闭（未启用断点续传）")
+            return
+        if self.persist_resume_json_var.get():
+            self.resume_persist_status_var.set("断点记录：已写入 JSON（输出目录）")
+            return
+        self.resume_persist_status_var.set("断点记录：仅会话内（不落盘）")
 
     def _delete_scope_label(self) -> str:
         mode = self._normalize_delete_scope_mode(self.delete_scope_var.get())
@@ -2480,6 +2492,7 @@ class ConverterApp(ttk.Frame):
         self.transcode_templates = self._load_transcode_templates(self.config_model.custom_templates_json)
         self._apply_theme(self.theme_mode_var.get())
         self._refresh_delete_scope_status()
+        self._refresh_resume_persist_status()
         self._refresh_action_state()
         self._refresh_dependency_status()
         self._refresh_drag_runtime_status()
