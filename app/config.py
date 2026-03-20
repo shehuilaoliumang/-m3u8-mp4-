@@ -26,6 +26,10 @@ class AppConfig:
     continue_on_error: bool = False
     smart_select_preference: str = "folder"
     delete_to_recycle_bin: bool = True
+    delete_scope_mode: str = "with_related_and_dirs"
+    delete_include_related_files: bool = True
+    delete_cleanup_empty_dirs: bool = True
+    delete_preview_before_execute: bool = True
     enable_drag_drop: bool = True
     decrypt_auto_parse_key: bool = True
     manual_decrypt_key_hex: str = ""
@@ -43,6 +47,8 @@ class AppConfig:
     max_workers: str = "1"
     log_level_filter: str = "全部"
     log_task_filter: str = "全部任务"
+    theme_mode: str = "light"
+    progressbar_color_mode: str = "green"
     window_geometry: str = "900x620"
 
 

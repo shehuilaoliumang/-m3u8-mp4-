@@ -86,6 +86,31 @@ class UiHelperTests(unittest.TestCase):
             ConverterApp._build_drag_runtime_status_text(True, False, True),
         )
 
+    def test_normalize_delete_scope_mode_uses_default_for_unknown_value(self) -> None:
+        self.assertEqual(ConverterApp._normalize_delete_scope_mode("playlist_only"), "playlist_only")
+        self.assertEqual(ConverterApp._normalize_delete_scope_mode("with_related_files"), "with_related_files")
+        self.assertEqual(
+            ConverterApp._normalize_delete_scope_mode("unknown_mode"),
+            "with_related_and_dirs",
+        )
+
+    def test_is_high_risk_delete_scope(self) -> None:
+        self.assertTrue(ConverterApp._is_high_risk_delete_scope("with_related_and_dirs"))
+        self.assertFalse(ConverterApp._is_high_risk_delete_scope("with_related_files"))
+        self.assertFalse(ConverterApp._is_high_risk_delete_scope("playlist_only"))
+
+    def test_normalize_theme_mode(self) -> None:
+        self.assertEqual(ConverterApp._normalize_theme_mode("light"), "light")
+        self.assertEqual(ConverterApp._normalize_theme_mode("dark"), "dark")
+        self.assertEqual(ConverterApp._normalize_theme_mode("unknown"), "light")
+
+    def test_normalize_progress_color_mode(self) -> None:
+        self.assertEqual(ConverterApp._normalize_progress_color_mode("green"), "green")
+        self.assertEqual(ConverterApp._normalize_progress_color_mode("blue"), "blue")
+        self.assertEqual(ConverterApp._normalize_progress_color_mode("orange"), "orange")
+        self.assertEqual(ConverterApp._normalize_progress_color_mode("purple"), "purple")
+        self.assertEqual(ConverterApp._normalize_progress_color_mode("unknown"), "green")
+
     def test_filter_help_sections_keeps_parent_chain(self) -> None:
         sections = [
             (1, "设置菜单", ""),
@@ -193,6 +218,99 @@ class UiHelperTests(unittest.TestCase):
         self.assertIn("分片数量：1", text)
         self.assertIn("加密状态：是", text)
         self.assertIn("KEY 可达性：可达", text)
+
+    def test_collect_related_source_files_includes_segments_key_and_child_playlist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            playlist = root / "index.m3u8"
+            child_dir = root / "video"
+            child_dir.mkdir()
+            child_playlist = child_dir / "video.m3u8"
+            key_file = root / "enc.key"
+            seg0 = root / "index0.ts"
+            child_seg = child_dir / "0.ts"
+
+            playlist.write_text(
+                "#EXTM3U\n"
+                "#EXT-X-STREAM-INF:BANDWIDTH=800000\n"
+                "video/video.m3u8\n"
+                "#EXT-X-KEY:METHOD=AES-128,URI=\"enc.key\"\n"
+                "#EXTINF:10,\n"
+                "index0.ts\n",
+                encoding="utf-8",
+            )
+            child_playlist.write_text("#EXTM3U\n#EXTINF:10,\n0.ts\n", encoding="utf-8")
+            key_file.write_bytes(b"0123456789abcdef")
+            seg0.write_bytes(b"a")
+            child_seg.write_bytes(b"b")
+
+            related = ConverterApp._collect_related_source_files(playlist)
+            self.assertIn(playlist.resolve(), related)
+            self.assertIn(child_playlist.resolve(), related)
+            self.assertIn(key_file.resolve(), related)
+            self.assertIn(seg0.resolve(), related)
+            self.assertIn(child_seg.resolve(), related)
+
+    def test_collect_related_source_files_skips_out_of_scope_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = root.parent / "outside.ts"
+            outside.write_bytes(b"x")
+            playlist = root / "index.m3u8"
+            playlist.write_text("#EXTM3U\n#EXTINF:10,\n../outside.ts\n", encoding="utf-8")
+
+            related = ConverterApp._collect_related_source_files(playlist)
+            self.assertIn(playlist.resolve(), related)
+            self.assertNotIn(outside.resolve(), related)
+
+            outside.unlink(missing_ok=True)
+
+    def test_collect_companion_config_files_includes_common_config_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            playlist = root / "index.m3u8"
+            playlist.write_text("#EXTM3U\n#EXTINF:10,\nindex0.ts\n", encoding="utf-8")
+            seg = root / "index0.ts"
+            seg.write_bytes(b"a")
+            cfg = root / "config"
+            cfg.write_text("demo", encoding="utf-8")
+            keyinfo = root / "enc.keyinfo"
+            keyinfo.write_text("demo", encoding="utf-8")
+
+            related = ConverterApp._collect_related_source_files(playlist)
+            companions = ConverterApp._collect_companion_config_files(playlist, related)
+            self.assertIn(cfg.resolve(), companions)
+            self.assertIn(keyinfo.resolve(), companions)
+
+    def test_try_fast_delete_parent_dir_succeeds_when_all_files_are_related(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "hls_case"
+            (root / "video").mkdir(parents=True)
+            playlist = root / "index.m3u8"
+            seg = root / "video" / "0.ts"
+            cfg = root / "config"
+            playlist.write_text("#EXTM3U\n#EXTINF:10,\nvideo/0.ts\n", encoding="utf-8")
+            seg.write_bytes(b"a")
+            cfg.write_text("demo", encoding="utf-8")
+
+            related = {playlist.resolve(), seg.resolve(), cfg.resolve()}
+            result = ConverterApp._try_fast_delete_parent_dir(playlist, related, use_recycle=False)
+            self.assertIsNotNone(result)
+            self.assertFalse(root.exists())
+
+    def test_try_fast_delete_parent_dir_returns_none_when_unrelated_file_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "hls_case"
+            root.mkdir(parents=True)
+            playlist = root / "index.m3u8"
+            unrelated = root / "keep.txt"
+            playlist.write_text("#EXTM3U\n#EXTINF:10,\n0.ts\n", encoding="utf-8")
+            unrelated.write_text("keep", encoding="utf-8")
+
+            related = {playlist.resolve()}
+            result = ConverterApp._try_fast_delete_parent_dir(playlist, related, use_recycle=False)
+            self.assertIsNone(result)
+            self.assertTrue(root.exists())
 
     def test_load_transcode_templates_parses_valid_json(self) -> None:
         raw = '{"720p":{"resolution":"1280x720","video_bitrate":"1800k"}}'

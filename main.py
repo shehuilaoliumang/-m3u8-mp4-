@@ -29,20 +29,52 @@ def _mount_scrollable_app(root: tk.Tk) -> ConverterApp:
     app = ConverterApp(root, auto_pack=False)
     app_window = canvas.create_window((0, 0), window=app, anchor="nw")
 
+    resize_after_id: str | None = None
+    last_canvas_width = 0
+    scrollbar_visible = False
+
+    def apply_host_theme() -> None:
+        mode = app.theme_mode_var.get() if hasattr(app, "theme_mode_var") else "light"
+        host_bg = "#1f1f1f" if mode == "dark" else "#f7f7f7"
+        root.configure(bg=host_bg)
+        container.configure(bg=host_bg)
+        canvas.configure(bg=host_bg, highlightbackground=host_bg)
+
     def update_scroll_region() -> None:
+        nonlocal scrollbar_visible, last_canvas_width
+        current_width = canvas.winfo_width()
+        if current_width > 1 and current_width != last_canvas_width:
+            canvas.itemconfigure(app_window, width=current_width)
+            last_canvas_width = current_width
+
         canvas.configure(scrollregion=canvas.bbox("all"))
-        need_scroll = app.winfo_reqheight() > canvas.winfo_height() + 2
-        if need_scroll and not vbar.winfo_ismapped():
+        need_scroll = app.winfo_reqheight() > canvas.winfo_height() + 4
+        if need_scroll == scrollbar_visible:
+            return
+        scrollbar_visible = need_scroll
+        if need_scroll:
             vbar.pack(side=tk.RIGHT, fill=tk.Y)
-        elif not need_scroll and vbar.winfo_ismapped():
+        else:
             vbar.pack_forget()
 
-    def on_canvas_configure(event: tk.Event) -> None:
-        canvas.itemconfigure(app_window, width=event.width)
+    def schedule_update_scroll_region() -> None:
+        nonlocal resize_after_id
+        if resize_after_id is not None:
+            return
+        # 合并连续 Configure 事件，降低窗口拖拽缩放时抖动。
+        resize_after_id = root.after(24, flush_scroll_region_update)
+
+    def flush_scroll_region_update() -> None:
+        nonlocal resize_after_id
+        resize_after_id = None
         update_scroll_region()
 
+    def on_canvas_configure(event: tk.Event) -> None:
+        _ = event
+        schedule_update_scroll_region()
+
     def on_app_configure(_event: tk.Event) -> None:
-        update_scroll_region()
+        schedule_update_scroll_region()
 
     canvas.bind("<Configure>", on_canvas_configure)
     app.bind("<Configure>", on_app_configure)
@@ -54,11 +86,15 @@ def _mount_scrollable_app(root: tk.Tk) -> ConverterApp:
         if delta != 0:
             canvas.yview_scroll(delta, "units")
 
-    root.bind_all("<MouseWheel>", on_mousewheel)
-    root.bind_all("<Button-4>", lambda _event: canvas.yview_scroll(-1, "units"))
-    root.bind_all("<Button-5>", lambda _event: canvas.yview_scroll(1, "units"))
+    for widget in (canvas, app):
+        widget.bind("<MouseWheel>", on_mousewheel)
+        widget.bind("<Button-4>", lambda _event: canvas.yview_scroll(-1, "units"))
+        widget.bind("<Button-5>", lambda _event: canvas.yview_scroll(1, "units"))
 
-    root.after(100, update_scroll_region)
+    app.bind("<<ThemeChanged>>", lambda _event: apply_host_theme())
+    apply_host_theme()
+
+    root.after(80, update_scroll_region)
     return app
 
 

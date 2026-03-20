@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import unquote, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
@@ -86,6 +86,8 @@ class ConverterApp(ttk.Frame):
         self.continue_on_error_var = tk.BooleanVar(value=self.config_model.continue_on_error)
         self.smart_select_preference_var = tk.StringVar(value=self.config_model.smart_select_preference)
         self.delete_to_recycle_var = tk.BooleanVar(value=self.config_model.delete_to_recycle_bin)
+        self.delete_scope_var = tk.StringVar(value=self._resolve_delete_scope_mode())
+        self.delete_preview_before_execute_var = tk.BooleanVar(value=self.config_model.delete_preview_before_execute)
         self.enable_drag_drop_var = tk.BooleanVar(value=self.config_model.enable_drag_drop)
         self.decrypt_auto_parse_var = tk.BooleanVar(value=self.config_model.decrypt_auto_parse_key)
         self.decrypt_key_var = tk.StringVar(value=self.config_model.manual_decrypt_key_hex)
@@ -105,9 +107,16 @@ class ConverterApp(ttk.Frame):
         self.status_var = tk.StringVar(value="就绪")
         self.dependency_status_var = tk.StringVar(value="依赖状态：检测中...")
         self.drag_runtime_status_var = tk.StringVar(value="拖放状态：检测中...")
+        self.delete_scope_status_var = tk.StringVar(value="删除范围：检测中...")
         self.progress_text_var = tk.StringVar(value="等待开始")
         self.progress_var = tk.DoubleVar(value=0.0)
+        self.cleanup_progress_text_var = tk.StringVar(value="清理进度：等待开始")
+        self.cleanup_progress_var = tk.DoubleVar(value=0.0)
         self.ffmpeg_hint_var = tk.StringVar(value="FFmpeg：自动检测中...")
+        self.theme_mode_var = tk.StringVar(value=self._normalize_theme_mode(self.config_model.theme_mode))
+        self.progress_color_var = tk.StringVar(
+            value=self._normalize_progress_color_mode(self.config_model.progressbar_color_mode)
+        )
 
         self.cancel_event: threading.Event | None = None
         self.delete_source_after_success = False
@@ -129,6 +138,9 @@ class ConverterApp(ttk.Frame):
         self._help_sections_cache_path = ""
         self._help_sections_cache_mtime: float | None = None
         self._help_loading_token = 0
+        self._classic_checkbuttons: list[tk.Checkbutton] = []
+        self._progressbar_style_name = "Green.Horizontal.TProgressbar"
+        self._cleanup_progressbar_style_name = "Cleanup.Horizontal.TProgressbar"
 
         self._build_widgets()
         self._defer_bootstrap_init()
@@ -136,9 +148,11 @@ class ConverterApp(ttk.Frame):
     def _defer_bootstrap_init(self) -> None:
         # 将启动阶段拆分到多个 after 周期，降低首帧卡顿与黑屏概率。
         self.status_var.set("初始化中...")
+        self._apply_theme(self.theme_mode_var.get())
         self._bind_live_validation()
         self._update_folder_option_state(False)
         self._refresh_action_state()
+        self._refresh_delete_scope_status()
         self.master.protocol("WM_DELETE_WINDOW", self.on_close)
         self.master.after(0, self._setup_drag_drop)
         self.master.after(30, self._refresh_drag_runtime_status)
@@ -192,6 +206,150 @@ class ConverterApp(ttk.Frame):
             "高质量（慢速重编码）": "high_quality",
         }
         return mapping.get(label, "fast_copy")
+
+    @staticmethod
+    def _normalize_theme_mode(value: str) -> str:
+        return value if value in {"light", "dark"} else "light"
+
+    @staticmethod
+    def _normalize_progress_color_mode(value: str) -> str:
+        return value if value in {"green", "blue", "orange", "purple"} else "green"
+
+    @staticmethod
+    def _progressbar_color_hex(mode: str) -> str:
+        mapping = {
+            "green": "#2dbf4f",
+            "blue": "#2f7df6",
+            "orange": "#f08a24",
+            "purple": "#8a5cf6",
+        }
+        return mapping.get(mode, "#2dbf4f")
+
+    @staticmethod
+    def _theme_toggle_button_text(mode: str) -> str:
+        return "白日模式" if mode == "dark" else "夜间模式"
+
+    def toggle_theme(self) -> None:
+        new_mode = "dark" if self.theme_mode_var.get() == "light" else "light"
+        self._apply_theme(new_mode)
+        self._save_config()
+        self._append_log(f"已切换为{'夜间' if new_mode == 'dark' else '白日'}模式", level="INFO", task="全局")
+
+    def _on_progress_color_change(self) -> None:
+        normalized = self._normalize_progress_color_mode(self.progress_color_var.get())
+        self.progress_color_var.set(normalized)
+        self._apply_theme(self.theme_mode_var.get())
+        self._save_config()
+        self._append_log(f"进度条颜色已设置为：{normalized}", level="INFO", task="全局")
+
+    def _apply_theme(self, mode: str) -> None:
+        normalized = self._normalize_theme_mode(mode)
+        self.theme_mode_var.set(normalized)
+
+        style = ttk.Style(self.master)
+        # 在 Windows 原生主题下，部分控件会忽略 foreground/background，导致白底白字。
+        # 统一切换到 clam 以确保按钮、输入框、下拉框等颜色可控。
+        if style.theme_use() != "clam":
+            style.theme_use("clam")
+
+        if normalized == "dark":
+            bg = "#1f1f1f"
+            panel = "#2a2a2a"
+            fg = "#e8e8e8"
+            input_bg = "#333333"
+            active_bg = "#3a3a3a"
+            disabled_fg = "#9a9a9a"
+            select_bg = "#2f2f2f"
+        else:
+            bg = "#f7f7f7"
+            panel = "#ffffff"
+            fg = "#222222"
+            input_bg = "#ffffff"
+            active_bg = "#f0f0f0"
+            disabled_fg = "#8a8a8a"
+            select_bg = "#ffffff"
+
+        style.configure(".", background=bg, foreground=fg)
+        style.configure("TFrame", background=bg)
+        style.configure("TLabel", background=bg, foreground=fg)
+        style.configure("TLabelframe", background=bg, foreground=fg)
+        style.configure("TLabelframe.Label", background=bg, foreground=fg)
+        style.configure("TCheckbutton", background=bg, foreground=fg)
+        style.configure("TRadiobutton", background=bg, foreground=fg)
+        style.map("TCheckbutton", foreground=[("disabled", disabled_fg), ("!disabled", fg)])
+        style.map("TRadiobutton", foreground=[("disabled", disabled_fg), ("!disabled", fg)])
+        style.configure("TButton", background=panel, foreground=fg)
+        style.map(
+            "TButton",
+            background=[("active", active_bg), ("disabled", panel)],
+            foreground=[("disabled", disabled_fg), ("!disabled", fg)],
+        )
+        style.configure("TMenubutton", background=panel, foreground=fg)
+        style.map(
+            "TMenubutton",
+            background=[("active", active_bg), ("disabled", panel)],
+            foreground=[("disabled", disabled_fg), ("!disabled", fg)],
+        )
+        style.configure("TEntry", fieldbackground=input_bg, background=input_bg, foreground=fg)
+        style.map("TEntry", foreground=[("disabled", disabled_fg), ("!disabled", fg)])
+        style.configure("TCombobox", fieldbackground=input_bg, background=panel, foreground=fg)
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", input_bg), ("!readonly", input_bg)],
+            foreground=[("readonly", fg), ("!readonly", fg), ("disabled", disabled_fg)],
+        )
+        style.configure("Vertical.TScrollbar", background=panel, troughcolor=bg, arrowcolor=fg)
+        style.map("Vertical.TScrollbar", background=[("active", active_bg)])
+        style.configure("Treeview", background=input_bg, fieldbackground=input_bg, foreground=fg)
+        style.map("Treeview", background=[("selected", "#4a6984")], foreground=[("selected", "#ffffff")])
+        style.configure("Treeview.Heading", background=panel, foreground=fg)
+        style.map("Treeview.Heading", background=[("active", active_bg)], foreground=[("active", fg)])
+        style.configure(
+            self._progressbar_style_name,
+            background=self._progressbar_color_hex(self.progress_color_var.get()),
+            darkcolor=self._progressbar_color_hex(self.progress_color_var.get()),
+            lightcolor=self._progressbar_color_hex(self.progress_color_var.get()),
+            troughcolor=panel,
+            bordercolor=panel,
+        )
+        style.configure(
+            self._cleanup_progressbar_style_name,
+            background="#26a0da",
+            darkcolor="#26a0da",
+            lightcolor="#26a0da",
+            troughcolor=panel,
+            bordercolor=panel,
+        )
+
+        self.master.configure(bg=bg)
+        self.configure(style="TFrame")
+
+        if hasattr(self, "theme_toggle_btn"):
+            self.theme_toggle_btn.configure(text=self._theme_toggle_button_text(normalized))
+
+        for name in ("preview_box", "log_box"):
+            if hasattr(self, name):
+                widget = getattr(self, name)
+                widget.configure(bg=input_bg, fg=fg, insertbackground=fg)
+
+        if hasattr(self, "help_canvas"):
+            self.help_canvas.configure(background=bg)
+
+        for check in self._classic_checkbuttons:
+            check.configure(
+                bg=bg,
+                fg=fg,
+                activebackground=bg,
+                activeforeground=fg,
+                selectcolor=select_bg,
+                disabledforeground=disabled_fg,
+                highlightthickness=0,
+            )
+
+        try:
+            self.event_generate("<<ThemeChanged>>", when="tail")
+        except tk.TclError:
+            return
 
     @staticmethod
     def _conflict_label(value: str) -> str:
@@ -255,9 +413,18 @@ class ConverterApp(ttk.Frame):
         )
 
     def _build_widgets(self) -> None:
+        self.columnconfigure(0, weight=0)
         self.columnconfigure(1, weight=1)
         self.columnconfigure(2, weight=0)
         self.columnconfigure(3, weight=0)
+
+        self.theme_toggle_btn = ttk.Button(
+            self,
+            text=self._theme_toggle_button_text(self.theme_mode_var.get()),
+            command=self.toggle_theme,
+            width=10,
+        )
+        self.theme_toggle_btn.grid(row=0, column=0, sticky="w", pady=(0, 8))
 
         settings_btn = ttk.Menubutton(self, text="设置")
         settings_menu = tk.Menu(settings_btn, tearoff=False)
@@ -274,7 +441,26 @@ class ConverterApp(ttk.Frame):
         recycle_menu.add_checkbutton(
             label="源文件删除改为回收站",
             variable=self.delete_to_recycle_var,
-            command=lambda: (self._save_config(), self._refresh_dependency_status()),
+            command=lambda: (self._save_config(), self._refresh_dependency_status(), self._refresh_delete_scope_status()),
+        )
+        delete_scope_menu = tk.Menu(settings_menu, tearoff=False)
+        delete_scope_menu.add_radiobutton(
+            label="仅 m3u8 文件（最保守）",
+            variable=self.delete_scope_var,
+            value="playlist_only",
+            command=lambda: (self._save_config(), self._refresh_delete_scope_status()),
+        )
+        delete_scope_menu.add_radiobutton(
+            label="m3u8 + 关联分片/KEY/子清单（推荐）",
+            variable=self.delete_scope_var,
+            value="with_related_files",
+            command=lambda: (self._save_config(), self._refresh_delete_scope_status()),
+        )
+        delete_scope_menu.add_radiobutton(
+            label="m3u8 + 关联分片/KEY/子清单 + 空目录（最彻底）",
+            variable=self.delete_scope_var,
+            value="with_related_and_dirs",
+            command=lambda: (self._save_config(), self._refresh_delete_scope_status()),
         )
         recycle_menu.add_command(label="检测回收站依赖状态", command=self.check_send2trash_status)
         recycle_menu.add_command(label="一键部署回收站依赖", command=self.install_send2trash)
@@ -310,6 +496,38 @@ class ConverterApp(ttk.Frame):
             command=self._save_config,
         )
         settings_menu.add_cascade(label="智能选择偏好", menu=smart_menu)
+        settings_menu.add_cascade(label="源文件删除范围", menu=delete_scope_menu)
+        progress_color_menu = tk.Menu(settings_menu, tearoff=False)
+        progress_color_menu.add_radiobutton(
+            label="绿色（默认）",
+            variable=self.progress_color_var,
+            value="green",
+            command=self._on_progress_color_change,
+        )
+        progress_color_menu.add_radiobutton(
+            label="蓝色",
+            variable=self.progress_color_var,
+            value="blue",
+            command=self._on_progress_color_change,
+        )
+        progress_color_menu.add_radiobutton(
+            label="橙色",
+            variable=self.progress_color_var,
+            value="orange",
+            command=self._on_progress_color_change,
+        )
+        progress_color_menu.add_radiobutton(
+            label="紫色",
+            variable=self.progress_color_var,
+            value="purple",
+            command=self._on_progress_color_change,
+        )
+        settings_menu.add_cascade(label="进度条颜色", menu=progress_color_menu)
+        settings_menu.add_checkbutton(
+            label="删除前显示预演清单",
+            variable=self.delete_preview_before_execute_var,
+            command=self._save_config,
+        )
         settings_menu.add_checkbutton(
             label="启用拖放（需重启生效）",
             variable=self.enable_drag_drop_var,
@@ -345,8 +563,8 @@ class ConverterApp(ttk.Frame):
 
         ttk.Label(self, textvariable=self.ffmpeg_hint_var).grid(
             row=0,
-            column=0,
-            columnspan=2,
+            column=1,
+            columnspan=1,
             sticky="w",
             pady=(0, 8),
         )
@@ -354,16 +572,14 @@ class ConverterApp(ttk.Frame):
         ttk.Label(self, text="输入来源（自动识别）：").grid(row=1, column=0, sticky="w", pady=(0, 8))
         ttk.Label(self, text="支持文件 / 文件夹 / URL").grid(row=1, column=1, sticky="w", pady=(0, 8))
 
-        self.recursive_check = ttk.Checkbutton(
-            self,
-            text="递归扫描子目录",
+        self.recursive_check = self._make_stateful_classic_checkbutton(
+            base_text="递归扫描子目录",
             variable=self.folder_recursive_var,
         )
         self.recursive_check.grid(row=1, column=2, sticky="w", pady=(0, 8))
 
-        self.first_only_check = ttk.Checkbutton(
-            self,
-            text="每目录仅首个",
+        self.first_only_check = self._make_stateful_classic_checkbutton(
+            base_text="每目录仅首个",
             variable=self.folder_first_only_var,
         )
         self.first_only_check.grid(row=1, column=3, sticky="w", pady=(0, 8))
@@ -410,9 +626,8 @@ class ConverterApp(ttk.Frame):
         )
         conflict_box.grid(row=5, column=3, sticky="ew", pady=(0, 8))
 
-        self.custom_mode_check = ttk.Checkbutton(
-            self,
-            text="自定义模式（分辨率/码率/帧率/采样率）",
+        self.custom_mode_check = self._make_stateful_classic_checkbutton(
+            base_text="自定义模式（分辨率/码率/帧率/采样率）",
             variable=self.transcode_mode_var,
             onvalue="custom",
             offvalue="preset",
@@ -426,23 +641,20 @@ class ConverterApp(ttk.Frame):
         self.decrypt_settings_btn = ttk.Button(self, text="加密解密设置", command=self.open_decrypt_settings)
         self.decrypt_settings_btn.grid(row=6, column=3, sticky="ew", pady=(0, 8))
 
-        self.preview_before_check = ttk.Checkbutton(
-            self,
-            text="开始前弹窗预览",
+        self.preview_before_check = self._make_stateful_classic_checkbutton(
+            base_text="开始前弹窗预览",
             variable=self.preview_before_start_var,
         )
         self.preview_before_check.grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
-        self.continue_on_error_check = ttk.Checkbutton(
-            self,
-            text="单项失败继续后续",
+        self.continue_on_error_check = self._make_stateful_classic_checkbutton(
+            base_text="单项失败继续后续",
             variable=self.continue_on_error_var,
         )
         self.continue_on_error_check.grid(row=7, column=2, sticky="w", pady=(0, 8))
 
-        self.resume_check = ttk.Checkbutton(
-            self,
-            text="断点续传（任务级）",
+        self.resume_check = self._make_stateful_classic_checkbutton(
+            base_text="断点续传（任务级）",
             variable=self.enable_resume_var,
             command=self._save_config,
         )
@@ -485,6 +697,7 @@ class ConverterApp(ttk.Frame):
 
         ttk.Progressbar(
             self,
+            style=self._progressbar_style_name,
             orient="horizontal",
             mode="determinate",
             maximum=100,
@@ -499,9 +712,25 @@ class ConverterApp(ttk.Frame):
             pady=(0, 8),
         )
 
-        ttk.Label(self, text="日志：").grid(row=14, column=0, sticky="w")
+        ttk.Progressbar(
+            self,
+            style=self._cleanup_progressbar_style_name,
+            orient="horizontal",
+            mode="determinate",
+            maximum=100,
+            variable=self.cleanup_progress_var,
+        ).grid(row=14, column=0, columnspan=4, sticky="ew", pady=(0, 4))
+        ttk.Label(self, textvariable=self.cleanup_progress_text_var).grid(
+            row=15,
+            column=0,
+            columnspan=4,
+            sticky="w",
+            pady=(0, 8),
+        )
+
+        ttk.Label(self, text="日志：").grid(row=16, column=0, sticky="w")
         log_toolbar = ttk.Frame(self)
-        log_toolbar.grid(row=14, column=1, columnspan=3, sticky="e")
+        log_toolbar.grid(row=16, column=1, columnspan=3, sticky="e")
         ttk.Label(log_toolbar, text="级别：").pack(side=tk.LEFT)
         self.log_level_box = ttk.Combobox(
             log_toolbar,
@@ -526,8 +755,8 @@ class ConverterApp(ttk.Frame):
         self.copy_error_btn.pack(side=tk.LEFT)
 
         self.log_box = scrolledtext.ScrolledText(self, height=12, state=tk.DISABLED)
-        self.log_box.grid(row=15, column=0, columnspan=4, sticky="nsew", pady=(4, 8))
-        self.rowconfigure(15, weight=1)
+        self.log_box.grid(row=17, column=0, columnspan=4, sticky="nsew", pady=(4, 8))
+        self.rowconfigure(17, weight=1)
         self.log_box.tag_configure("success", foreground="#1f7a1f")
         self.log_box.tag_configure("warning", foreground="#b36b00")
         self.log_box.tag_configure("error", foreground="#cc0000")
@@ -536,9 +765,47 @@ class ConverterApp(ttk.Frame):
         self.log_level_var_trace = self.log_level_filter_var.trace_add("write", self._on_log_filter_change)
         self.log_task_var_trace = self.log_task_filter_var.trace_add("write", self._on_log_filter_change)
 
-        ttk.Label(self, textvariable=self.status_var).grid(row=16, column=0, columnspan=2, sticky="w")
-        ttk.Label(self, textvariable=self.dependency_status_var).grid(row=16, column=2, columnspan=2, sticky="e")
-        ttk.Label(self, textvariable=self.drag_runtime_status_var).grid(row=17, column=0, columnspan=4, sticky="w")
+        ttk.Label(self, textvariable=self.status_var).grid(row=18, column=0, columnspan=2, sticky="w")
+        ttk.Label(self, textvariable=self.dependency_status_var).grid(row=18, column=2, columnspan=2, sticky="e")
+        ttk.Label(self, textvariable=self.drag_runtime_status_var).grid(row=19, column=0, columnspan=2, sticky="w")
+        ttk.Label(self, textvariable=self.delete_scope_status_var).grid(row=19, column=2, columnspan=2, sticky="e")
+
+    def _make_classic_checkbutton(self, **kwargs: object) -> tk.Checkbutton:
+        check = tk.Checkbutton(self, anchor="w", indicatoron=True, takefocus=True, **kwargs)
+        self._classic_checkbuttons.append(check)
+        return check
+
+    @staticmethod
+    def _format_checkbutton_text(base_text: str, enabled: bool) -> str:
+        return f"{base_text}（{'已开启' if enabled else '未开启'}）"
+
+    def _make_stateful_classic_checkbutton(
+        self,
+        base_text: str,
+        variable: tk.Variable,
+        onvalue: object = True,
+        offvalue: object = False,
+        command: Callable[[], None] | None = None,
+    ) -> tk.Checkbutton:
+        def update_text() -> None:
+            current = variable.get()
+            check.configure(text=self._format_checkbutton_text(base_text, current == onvalue))
+
+        def on_toggle() -> None:
+            update_text()
+            if command is not None:
+                command()
+
+        check = self._make_classic_checkbutton(
+            text=base_text,
+            variable=variable,
+            onvalue=onvalue,
+            offvalue=offvalue,
+            command=on_toggle,
+        )
+        variable.trace_add("write", lambda *_args: update_text())
+        update_text()
+        return check
 
     def _update_folder_option_state(self, enabled: bool) -> None:
         state = tk.NORMAL if enabled else tk.DISABLED
@@ -725,6 +992,277 @@ class ConverterApp(ttk.Frame):
         path = Path(source)
         return path.exists() and path.is_file()
 
+    @staticmethod
+    def _extract_uri_from_tag(line: str) -> str | None:
+        match = re.search(r'URI="([^"]+)"', line)
+        if not match:
+            return None
+        uri = match.group(1).strip()
+        return uri or None
+
+    @staticmethod
+    def _is_path_under(base: Path, target: Path) -> bool:
+        try:
+            target.relative_to(base)
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _resolve_local_m3u8_reference(base_playlist: Path, raw_uri: str) -> Path | None:
+        uri = raw_uri.strip()
+        if not uri:
+            return None
+
+        if uri.lower().startswith(("http://", "https://")):
+            return None
+
+        if uri.lower().startswith("file://"):
+            local = unquote(uri[7:])
+            if not local:
+                return None
+            return Path(local).expanduser().resolve()
+
+        parsed = urlparse(uri)
+        if parsed.scheme and parsed.netloc:
+            return None
+
+        candidate = Path(uri).expanduser()
+        if candidate.is_absolute():
+            return candidate.resolve()
+
+        relative_path = parsed.path or uri
+        relative_path = relative_path.split("?", 1)[0].split("#", 1)[0].strip()
+        if not relative_path:
+            return None
+        return (base_playlist.parent / relative_path).resolve()
+
+    @classmethod
+    def _collect_related_source_files(cls, source_file: Path) -> set[Path]:
+        root_playlist = source_file.expanduser().resolve()
+        if not root_playlist.exists() or not root_playlist.is_file():
+            return set()
+
+        related_files: set[Path] = {root_playlist}
+        visited_playlists: set[Path] = set()
+        pending_playlists: list[Path] = [root_playlist]
+        scope_root = root_playlist.parent
+
+        while pending_playlists:
+            playlist = pending_playlists.pop()
+            if playlist in visited_playlists:
+                continue
+            visited_playlists.add(playlist)
+            if not playlist.exists() or not playlist.is_file():
+                continue
+
+            try:
+                text = playlist.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+
+                ref_uri: str | None = None
+                if line.startswith("#"):
+                    if "URI=" in line:
+                        ref_uri = cls._extract_uri_from_tag(line)
+                else:
+                    ref_uri = line
+
+                if not ref_uri:
+                    continue
+                resolved = cls._resolve_local_m3u8_reference(playlist, ref_uri)
+                if resolved is None:
+                    continue
+                if not cls._is_path_under(scope_root, resolved):
+                    continue
+                if not resolved.exists() or not resolved.is_file():
+                    continue
+
+                related_files.add(resolved)
+                if resolved.suffix.lower() == ".m3u8":
+                    pending_playlists.append(resolved)
+
+        return related_files
+
+    @classmethod
+    def _collect_cleanup_dirs(cls, root_playlist: Path, related_files: set[Path]) -> list[Path]:
+        scope_root = root_playlist.parent.resolve()
+        dirs: set[Path] = {scope_root}
+        for file_path in related_files:
+            current = file_path.parent.resolve()
+            while cls._is_path_under(scope_root, current):
+                dirs.add(current)
+                if current == scope_root:
+                    break
+                current = current.parent
+        return sorted(dirs, key=lambda item: len(item.parts), reverse=True)
+
+    @classmethod
+    def _collect_companion_config_files(cls, root_playlist: Path, related_files: set[Path]) -> set[Path]:
+        root_dir = root_playlist.parent.resolve()
+        companions: set[Path] = set()
+        for entry in root_dir.iterdir():
+            if not entry.is_file():
+                continue
+            resolved = entry.resolve()
+            if resolved in related_files:
+                continue
+            name = resolved.name.lower()
+            stem = resolved.stem.lower()
+            suffix = resolved.suffix.lower()
+            if name == "config" or name.startswith("config."):
+                companions.add(resolved)
+                continue
+            if stem in {"config", "settings", "setting", "cfg", "keyinfo"}:
+                companions.add(resolved)
+                continue
+            if suffix in {".keyinfo", ".cfg", ".conf", ".config"}:
+                companions.add(resolved)
+                continue
+        return companions
+
+    @classmethod
+    def _try_fast_delete_parent_dir(
+        cls,
+        source_path: Path,
+        related_files: set[Path],
+        use_recycle: bool,
+        force_delete_any: bool = False,
+    ) -> tuple[int, int] | None:
+        root_dir = source_path.parent.resolve()
+        if not root_dir.exists() or not root_dir.is_dir():
+            return None
+
+        files_on_disk: set[Path] = set()
+        dir_count = 0
+        for current_root, dir_names, file_names in os.walk(root_dir):
+            current_dir = Path(current_root).resolve()
+            if not cls._is_path_under(root_dir, current_dir):
+                return None
+            dir_count += len(dir_names)
+            for file_name in file_names:
+                files_on_disk.add((current_dir / file_name).resolve())
+
+        if not files_on_disk:
+            return None
+        if not force_delete_any and not files_on_disk.issubset(related_files):
+            return None
+
+        try:
+            if use_recycle and send2trash is not None:
+                send2trash(str(root_dir))
+            else:
+                shutil.rmtree(root_dir)
+        except OSError:
+            return None
+        return len(files_on_disk), dir_count + 1
+
+    @staticmethod
+    def _normalize_delete_scope_mode(value: str) -> str:
+        return value if value in {"playlist_only", "with_related_files", "with_related_and_dirs"} else "with_related_and_dirs"
+
+    def _resolve_delete_scope_mode(self) -> str:
+        configured = self._normalize_delete_scope_mode(getattr(self.config_model, "delete_scope_mode", ""))
+        if configured != "with_related_and_dirs" or getattr(self.config_model, "delete_scope_mode", ""):
+            return configured
+
+        # 兼容旧配置：由两个布尔值推导删除策略。
+        include_related = getattr(self.config_model, "delete_include_related_files", True)
+        cleanup_dirs = getattr(self.config_model, "delete_cleanup_empty_dirs", True)
+        if not include_related:
+            return "playlist_only"
+        if not cleanup_dirs:
+            return "with_related_files"
+        return "with_related_and_dirs"
+
+    def _delete_scope_flags(self) -> tuple[bool, bool]:
+        mode = self._normalize_delete_scope_mode(self.delete_scope_var.get())
+        if mode == "playlist_only":
+            return False, False
+        if mode == "with_related_files":
+            return True, False
+        return True, True
+
+    @staticmethod
+    def _is_high_risk_delete_scope(mode: str) -> bool:
+        return ConverterApp._normalize_delete_scope_mode(mode) == "with_related_and_dirs"
+
+    def _refresh_delete_scope_status(self) -> None:
+        self.delete_scope_status_var.set(f"删除范围：{self._delete_scope_label()}")
+
+    def _delete_scope_label(self) -> str:
+        mode = self._normalize_delete_scope_mode(self.delete_scope_var.get())
+        if mode == "playlist_only":
+            return "仅 m3u8 文件（最保守）"
+        if mode == "with_related_and_dirs":
+            return "m3u8 + 关联分片/KEY/子清单 + 空目录（最彻底）"
+        return "m3u8 + 关联分片/KEY/子清单（推荐）"
+
+    def _build_delete_preview_text(self, sources: list[tuple[str, str | None, Path | None]]) -> str:
+        include_related_files, cleanup_empty_dirs = self._delete_scope_flags()
+        local_sources = [source for source, _, _ in sources if self._is_local_file_source(source)]
+
+        all_files: set[Path] = set()
+        all_dirs: set[Path] = set()
+        for source in local_sources:
+            src_path = Path(source).expanduser().resolve()
+            if not src_path.exists() or not src_path.is_file():
+                continue
+            if include_related_files:
+                related = self._collect_related_source_files(src_path)
+                related.update(self._collect_companion_config_files(src_path, related))
+            else:
+                related = {src_path}
+            all_files.update(path for path in related if path.exists() and path.is_file())
+            if include_related_files and cleanup_empty_dirs and not self.delete_to_recycle_var.get():
+                all_dirs.update(self._collect_cleanup_dirs(src_path, related))
+
+        sample_files = sorted(all_files, key=lambda p: str(p))[:12]
+        lines = [
+            f"本次删除策略：{self._delete_scope_label()}",
+            f"删除方式：{'回收站' if self.delete_to_recycle_var.get() and send2trash is not None else '永久删除'}",
+            f"本地输入数量：{len(local_sources)}",
+            f"预计删除文件：{len(all_files)} 个",
+            f"预计清理空目录候选：{len(all_dirs)} 个",
+            "",
+            "删除文件示例（最多 12 条）：",
+        ]
+        if include_related_files and cleanup_empty_dirs and not self.delete_to_recycle_var.get():
+            lines.insert(5, "性能优化：若目录仅含可识别关联文件，将直接删除 m3u8 上级目录。")
+        if sample_files:
+            lines.extend(f"- {item}" for item in sample_files)
+        else:
+            lines.append("- （未识别到可删除文件）")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_cleanup_verify_note(source_path: Path) -> str:
+        parent = source_path.parent.resolve()
+        if not parent.exists():
+            return "核验：上级目录已清理完成（目录不存在）"
+
+        try:
+            remaining = list(parent.iterdir())
+        except OSError as exc:
+            return f"核验：无法读取上级目录（{exc}）"
+
+        if not remaining:
+            return "核验：上级目录为空（可手动删除）"
+
+        sample = ", ".join(item.name for item in sorted(remaining, key=lambda p: p.name.lower())[:3])
+        more = "" if len(remaining) <= 3 else " ..."
+        return f"核验：上级目录仍有 {len(remaining)} 项 -> {sample}{more}"
+
+    @staticmethod
+    def _is_cleanup_verify_success(note: str) -> bool:
+        text = note.strip()
+        return text.startswith("核验：上级目录已清理完成") or text.startswith("核验：上级目录为空")
+
     def clear_source(self) -> None:
         self.local_files = []
         self.source_var.set("")
@@ -753,16 +1291,58 @@ class ConverterApp(ttk.Frame):
             return "folder"
         return "file"
 
-    def _delete_source_file(self, file_path: str) -> None:
-        source_path = Path(file_path)
-        if not source_path.exists():
-            return
+    def _delete_source_file(
+        self,
+        file_path: str,
+        include_related_files: bool = True,
+        cleanup_empty_dirs: bool = True,
+        allow_fast_parent_remove: bool = False,
+        force_remove_parent_dir: bool = False,
+    ) -> tuple[int, int]:
+        source_path = Path(file_path).expanduser().resolve()
+        related_files = (
+            self._collect_related_source_files(source_path)
+            if include_related_files
+            else ({source_path} if source_path.exists() and source_path.is_file() else set())
+        )
+        if include_related_files and source_path.exists() and source_path.is_file():
+            related_files.update(self._collect_companion_config_files(source_path, related_files))
+        if not related_files and source_path.exists() and source_path.is_file():
+            related_files = {source_path}
 
-        if self.delete_to_recycle_var.get() and send2trash is not None:
-            send2trash(str(source_path))
-            return
+        use_recycle = self.delete_to_recycle_var.get() and send2trash is not None
+        if allow_fast_parent_remove and include_related_files and cleanup_empty_dirs:
+            fast_deleted = self._try_fast_delete_parent_dir(
+                source_path,
+                related_files,
+                use_recycle=use_recycle,
+                force_delete_any=force_remove_parent_dir,
+            )
+            if fast_deleted is not None:
+                return fast_deleted
 
-        source_path.unlink()
+        deleted_file_count = 0
+        for target in sorted(related_files, key=lambda item: len(item.parts), reverse=True):
+            if not target.exists() or not target.is_file():
+                continue
+            if use_recycle:
+                send2trash(str(target))
+            else:
+                target.unlink()
+            deleted_file_count += 1
+
+        deleted_dir_count = 0
+        if include_related_files and cleanup_empty_dirs:
+            for folder in self._collect_cleanup_dirs(source_path, related_files):
+                if not folder.exists() or not folder.is_dir():
+                    continue
+                try:
+                    folder.rmdir()
+                    deleted_dir_count += 1
+                except OSError:
+                    continue
+
+        return deleted_file_count, deleted_dir_count
 
     def _quick_check_source(self) -> None:
         try:
@@ -1870,6 +2450,8 @@ class ConverterApp(ttk.Frame):
         self.continue_on_error_var.set(self.config_model.continue_on_error)
         self.smart_select_preference_var.set(self.config_model.smart_select_preference)
         self.delete_to_recycle_var.set(self.config_model.delete_to_recycle_bin)
+        self.delete_scope_var.set(self._resolve_delete_scope_mode())
+        self.delete_preview_before_execute_var.set(self.config_model.delete_preview_before_execute)
         self.enable_drag_drop_var.set(self.config_model.enable_drag_drop)
         self.decrypt_auto_parse_var.set(self.config_model.decrypt_auto_parse_key)
         self.decrypt_key_var.set(self.config_model.manual_decrypt_key_hex)
@@ -1886,7 +2468,11 @@ class ConverterApp(ttk.Frame):
         self.max_workers_var.set(self.config_model.max_workers or "1")
         self.log_level_filter_var.set(self.config_model.log_level_filter or "全部")
         self.log_task_filter_var.set(self.config_model.log_task_filter or "全部任务")
+        self.theme_mode_var.set(self._normalize_theme_mode(self.config_model.theme_mode))
+        self.progress_color_var.set(self._normalize_progress_color_mode(self.config_model.progressbar_color_mode))
         self.transcode_templates = self._load_transcode_templates(self.config_model.custom_templates_json)
+        self._apply_theme(self.theme_mode_var.get())
+        self._refresh_delete_scope_status()
         self._refresh_action_state()
         self._refresh_dependency_status()
         self._refresh_drag_runtime_status()
@@ -2523,6 +3109,11 @@ class ConverterApp(ttk.Frame):
         self.progress_var.set(value)
         self.progress_text_var.set(f"{int(value)}% - {message}")
 
+    def _update_cleanup_progress(self, percent: float, message: str) -> None:
+        value = max(0.0, min(100.0, percent))
+        self.cleanup_progress_var.set(value)
+        self.cleanup_progress_text_var.set(f"{int(value)}% - {message}")
+
     def _queue_progress_update(self, percent: float, message: str) -> None:
         with self._progress_state_lock:
             self._pending_progress = (percent, message)
@@ -2683,12 +3274,14 @@ class ConverterApp(ttk.Frame):
             delete_mode = "回收站" if self.delete_to_recycle_var.get() else "永久删除"
             if self.delete_to_recycle_var.get() and send2trash is None:
                 delete_mode = "永久删除（未安装 send2trash）"
+            delete_scope = self._delete_scope_label()
 
             delete_choice = messagebox.askyesnocancel(
                 "源文件处理",
                 f"检测到 {local_source_count} 个本地源文件\n\n"
                 f"删除方式：{delete_mode}\n\n"
-                "转换成功后是否删除源 m3u8 文件？",
+                f"删除范围：{delete_scope}\n\n"
+                "转换成功后是否执行删除？",
             )
             if delete_choice is None:
                 self._set_busy(False)
@@ -2700,6 +3293,37 @@ class ConverterApp(ttk.Frame):
                 "本次任务源文件处理：转换成功后删除" if delete_choice else "本次任务源文件处理：保留源文件",
                 level="INFO",
             )
+
+            if delete_choice and self.delete_preview_before_execute_var.get():
+                preview_text = self._build_delete_preview_text(sources)
+                preview_confirm = messagebox.askyesno(
+                    "删除预演确认",
+                    f"以下为执行前预演结果：\n\n{preview_text}\n\n是否按上述策略继续转换并在成功后删除源文件？",
+                    icon="warning",
+                )
+                if not preview_confirm:
+                    self._set_busy(False)
+                    self.status_var.set("就绪")
+                    self._append_log("用户取消了删除预演确认，任务未开始", level="WARNING")
+                    return
+
+            if (
+                delete_choice
+                and self._is_high_risk_delete_scope(self.delete_scope_var.get())
+                and not self.delete_to_recycle_var.get()
+            ):
+                danger_confirm = messagebox.askyesno(
+                    "高风险删除确认",
+                    "当前删除策略为“最彻底”，且为永久删除模式。\n"
+                    "转换成功后将删除 m3u8、关联分片/KEY，并尽可能清理空目录。\n\n"
+                    "此操作不可恢复，是否继续？",
+                    icon="warning",
+                )
+                if not danger_confirm:
+                    self._set_busy(False)
+                    self.status_var.set("就绪")
+                    self._append_log("用户取消了高风险删除策略，任务未开始", level="WARNING")
+                    return
 
         if self.preview_before_start_var.get():
             preview_text = "\n".join(preview_lines[:20])
@@ -2724,6 +3348,8 @@ class ConverterApp(ttk.Frame):
         self.status_var.set("转换中...")
         self.progress_var.set(0.0)
         self.progress_text_var.set("0% - 开始转换")
+        self.cleanup_progress_var.set(0.0)
+        self.cleanup_progress_text_var.set("0% - 等待清理阶段")
         self._append_log(f"任务开始，共 {len(sources)} 个输入源", level="INFO")
 
         decrypt_options = self._collect_decrypt_options()
@@ -2766,11 +3392,27 @@ class ConverterApp(ttk.Frame):
         base_output_name = self.output_name_var.get().strip() or None
         continue_on_error = self.continue_on_error_var.get()
         failed_items: list[str] = []
+        cleanup_verify_issues: list[str] = []
         resume_store = ResumeStore(Path(output_dir)) if resume_enabled else None
         resume_lock = threading.Lock()
+        parent_remaining_lock = threading.Lock()
+        cleanup_verify_lock = threading.Lock()
         progress_map: dict[int, float] = {idx: 0.0 for idx in range(1, total + 1)}
         progress_lock = threading.Lock()
         max_workers = max(1, min(8, int(self.max_workers_var.get().strip() or "1")))
+        cleanup_total = (
+            sum(1 for source, _, _ in sources if self._is_local_file_source(source))
+            if self.delete_source_after_success
+            else 0
+        )
+        cleanup_state = {"done": 0}
+        cleanup_lock = threading.Lock()
+        parent_remaining: dict[Path, int] = {}
+        for source, _, _ in sources:
+            if not self._is_local_file_source(source):
+                continue
+            parent = Path(source).expanduser().resolve().parent
+            parent_remaining[parent] = parent_remaining.get(parent, 0) + 1
 
         def calc_output_name(index: int, suggested_name: str | None) -> str | None:
             current_output_name = base_output_name or suggested_name
@@ -2872,17 +3514,88 @@ class ConverterApp(ttk.Frame):
                         note="完成" if not result.skipped else "跳过",
                     )
 
+            source_parent = Path(source).expanduser().resolve().parent
+            is_last_in_parent = False
+            if self._is_local_file_source(source):
+                with parent_remaining_lock:
+                    remain = parent_remaining.get(source_parent, 0)
+                    if remain > 0:
+                        remain -= 1
+                    parent_remaining[source_parent] = remain
+                    is_last_in_parent = remain == 0
+
             if (
                 self.delete_source_after_success
                 and not result.skipped
                 and self._is_local_file_source(source)
             ):
                 try:
-                    self._delete_source_file(source)
+                    delete_scope_mode = self._normalize_delete_scope_mode(self.delete_scope_var.get())
+                    include_related_files, cleanup_empty_dirs = self._delete_scope_flags()
+                    with progress_lock:
+                        overall = sum(progress_map.values()) / total
+                    self.master.after(0, self.status_var.set, f"清理源文件中（{task_label}）...")
+                    self._queue_progress_update(overall, f"[{task_label}] 转换完成，正在清理源文件...")
+
+                    if delete_scope_mode == "with_related_and_dirs" and not is_last_in_parent:
+                        self.master.after(0, self._append_log, f"同目录任务未完成，延迟到最后统一清理：{source_parent}", "DEBUG", task_label)
+                        with cleanup_lock:
+                            cleanup_state["done"] += 1
+                            done = cleanup_state["done"]
+                        if cleanup_total > 0:
+                            self.master.after(
+                                0,
+                                self._update_cleanup_progress,
+                                done / cleanup_total * 100,
+                                f"清理排队 {done}/{cleanup_total}（{task_label}）",
+                            )
+                        self.master.after(0, self.status_var.set, "转换中...")
+                        return index, "success", str(result.output_file)
+
+                    deleted_files, deleted_dirs = self._delete_source_file(
+                        source,
+                        include_related_files=include_related_files,
+                        cleanup_empty_dirs=cleanup_empty_dirs,
+                        allow_fast_parent_remove=is_last_in_parent,
+                        force_remove_parent_dir=(delete_scope_mode == "with_related_and_dirs"),
+                    )
                     mode = "回收站" if self.delete_to_recycle_var.get() and send2trash is not None else "永久删除"
-                    self.master.after(0, self._append_log, f"已处理源文件（{mode}）：{source}", "DEBUG", task_label)
+                    scope = self._delete_scope_label()
+                    self.master.after(
+                        0,
+                        self._append_log,
+                        f"已处理源文件（{mode}/{scope}）：{source} | 删除文件 {deleted_files} 个，清理空目录 {deleted_dirs} 个",
+                        "DEBUG",
+                        task_label,
+                    )
+                    verify_note = self._build_cleanup_verify_note(Path(source).expanduser().resolve())
+                    self.master.after(0, self._append_log, verify_note, "INFO", task_label)
+                    if not self._is_cleanup_verify_success(verify_note):
+                        with cleanup_verify_lock:
+                            cleanup_verify_issues.append(f"[{task_label}] {source} -> {verify_note}")
+                    with cleanup_lock:
+                        cleanup_state["done"] += 1
+                        done = cleanup_state["done"]
+                    if cleanup_total > 0:
+                        self.master.after(
+                            0,
+                            self._update_cleanup_progress,
+                            done / cleanup_total * 100,
+                            f"清理中 {done}/{cleanup_total}（{task_label}）",
+                        )
+                    self.master.after(0, self.status_var.set, "转换中...")
                 except OSError as exc:
                     self.master.after(0, self._append_log, f"删除源文件失败：{source} ({exc})", "WARNING", task_label)
+                    with cleanup_lock:
+                        cleanup_state["done"] += 1
+                        done = cleanup_state["done"]
+                    if cleanup_total > 0:
+                        self.master.after(
+                            0,
+                            self._update_cleanup_progress,
+                            done / cleanup_total * 100,
+                            f"清理异常 {done}/{cleanup_total}（{task_label}）",
+                        )
 
             if result.skipped:
                 return index, "skipped", str(result.output_file)
@@ -2939,14 +3652,18 @@ class ConverterApp(ttk.Frame):
                         log_text = f"完成：{payload}" if status == "success" else f"跳过：{payload}"
                         self.master.after(0, self._append_log, log_text, log_level, task_label)
 
-            self.master.after(0, self._on_success_batch, failed_items)
+            self.master.after(0, self._on_success_batch, failed_items, cleanup_verify_issues)
         except (FFmpegNotFoundError, InvalidInputError, ConvertFailedError, CancelledError) as exc:
             self.master.after(0, self._on_error, str(exc))
         except Exception as exc:  # pragma: no cover
             self.master.after(0, self._on_error, f"未预期错误：{exc}")
 
-    def _on_success_batch(self, failed_items: list[str]) -> None:
+    def _on_success_batch(self, failed_items: list[str], cleanup_verify_issues: list[str]) -> None:
         self._set_busy(False)
+        if self.delete_source_after_success:
+            self._update_cleanup_progress(100.0, "源文件清理完成")
+        else:
+            self._update_cleanup_progress(100.0, "本次未启用源文件清理")
         if failed_items:
             self.status_var.set("部分完成")
             msg_title = "部分任务完成"
@@ -2954,6 +3671,15 @@ class ConverterApp(ttk.Frame):
                 f"任务处理完成！共 {len(failed_items)} 项失败：\n\n"
                 "您可以查看日志区域了解详细信息，\n"
                 "修改设置后可重新尝试失败的项目。"
+            )
+            self._play_notify_sound("error")
+        elif cleanup_verify_issues:
+            self.status_var.set("部分完成")
+            msg_title = "转换完成（清理需关注）"
+            msg_text = (
+                "转换任务已完成，但清理核验发现部分目录仍有残留。\n\n"
+                f"残留项：{len(cleanup_verify_issues)}\n"
+                "请在日志中查看“核验：上级目录仍有 ...”对应条目。"
             )
             self._play_notify_sound("error")
         else:
@@ -2968,12 +3694,18 @@ class ConverterApp(ttk.Frame):
             self._append_log(f"其中失败 {len(failed_items)} 项：", level="WARNING", task="全局")
             for item in failed_items:
                 self._append_log(item, level="ERROR", task="全局")
+        if cleanup_verify_issues:
+            self._append_log(f"清理核验仍有残留 {len(cleanup_verify_issues)} 项：", level="WARNING", task="全局")
+            for item in cleanup_verify_issues:
+                self._append_log(item, level="WARNING", task="全局")
         self._save_config()
         messagebox.showinfo(msg_title, msg_text)
 
     def _on_error(self, message: str) -> None:
         message = sanitize_ffmpeg_error_text(message, message)
         self._set_busy(False)
+        if self.delete_source_after_success:
+            self._update_cleanup_progress(self.cleanup_progress_var.get(), "清理阶段已中断")
         if "取消" in message:
             self.status_var.set("已取消")
             self._append_log(f"任务取消：{message}", level="WARNING", task="全局")
@@ -2987,6 +3719,9 @@ class ConverterApp(ttk.Frame):
             messagebox.showerror("转换失败", f"转换过程中出现错误：\n\n{message}\n\n请检查设置或日志获取更多信息。")
 
     def _save_config(self) -> None:
+        delete_scope_mode = self._normalize_delete_scope_mode(self.delete_scope_var.get())
+        include_related_files = delete_scope_mode != "playlist_only"
+        cleanup_empty_dirs = delete_scope_mode == "with_related_and_dirs"
         self.config_model = AppConfig(
             last_output_dir=self.output_var.get().strip() or str(Path.cwd()),
             default_output_dir=self.default_output_dir,
@@ -3010,6 +3745,10 @@ class ConverterApp(ttk.Frame):
             continue_on_error=self.continue_on_error_var.get(),
             smart_select_preference=self.smart_select_preference_var.get(),
             delete_to_recycle_bin=self.delete_to_recycle_var.get(),
+            delete_scope_mode=delete_scope_mode,
+            delete_include_related_files=include_related_files,
+            delete_cleanup_empty_dirs=cleanup_empty_dirs,
+            delete_preview_before_execute=self.delete_preview_before_execute_var.get(),
             enable_drag_drop=self.enable_drag_drop_var.get(),
             decrypt_auto_parse_key=self.decrypt_auto_parse_var.get(),
             manual_decrypt_key_hex=self.decrypt_key_var.get().strip(),
@@ -3027,9 +3766,12 @@ class ConverterApp(ttk.Frame):
             max_workers=self.max_workers_var.get().strip() or "1",
             log_level_filter=self.log_level_filter_var.get().strip() or "全部",
             log_task_filter=self.log_task_filter_var.get().strip() or "全部任务",
+            theme_mode=self._normalize_theme_mode(self.theme_mode_var.get()),
+            progressbar_color_mode=self._normalize_progress_color_mode(self.progress_color_var.get()),
             window_geometry=self.master.winfo_geometry(),
         )
         save_config(self.config_model)
+        self._refresh_delete_scope_status()
 
     def on_close(self) -> None:
         if self._log_render_after_id is not None:

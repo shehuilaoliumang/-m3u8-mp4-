@@ -127,7 +127,7 @@ python main.py
 
 ### 主界面
 
-![主界面预览](assets/screenshots/main-window.png)
+![主界面预览](assets/screenshots/v1.2/main-window.png)
 
 ### 设置 - 依赖中心
 
@@ -367,22 +367,26 @@ python -m unittest discover -s tests -v
 
 ## 打包为 EXE（可选）
 
-### 安装依赖
+### 推荐方式（双击）
+
+- 直接双击项目根目录的 `build_exe.bat`
+- 脚本会自动调用 `scripts/build_exe.ps1` 并临时绕过执行策略限制
+
+### 命令行方式
 
 ```powershell
-pip install pyinstaller
+powershell -ExecutionPolicy Bypass -File .\scripts\build_exe.ps1
 ```
 
-### 打包命令
-
-```powershell
-./scripts/build_exe.ps1
-```
-
-说明：脚本会自动执行 `--add-data "README.md;."`，确保 EXE 内置帮助可正常读取文档。
+说明：脚本会自动安装 `pyinstaller`，并执行 `--add-data "README.md;."`，确保 EXE 内置帮助可正常读取文档。
 
 ### 输出位置
 - 生成的 `m3u8ToMp4.exe` 位于 `dist` 目录下
+- 会自动整理发布目录 `release`，包含以下文件：
+  - `m3u8ToMp4.exe`
+  - `README.md`
+  - 最新的 `RELEASE_v*.short.md`
+  - `BUILD_INFO.txt`
 - 可直接双击运行，无需 Python 环境
 
 ### 发布建议（GitHub Releases）
@@ -475,6 +479,6 @@ powershell -ExecutionPolicy Bypass -File "scripts/start_ui_hls_fixture.ps1" -Ope
 
 ---
 
-**版本** - 1.2  
+**版本** - 1.3  
 **最后更新** - 2026年3月
 
