@@ -6,6 +6,7 @@
 
 - [功能特性](#功能特性)
 - [快速开始](#快速开始)
+- [项目结构](#项目结构)
 - [截图预览](#截图预览)
 - [设置菜单详解](#设置菜单详解)
 - [打包为 EXE可选](#打包为-exe可选)
@@ -118,6 +119,21 @@ python main.py
 6. 选择转换预设与重名策略
 7. 可按需启用预览和继续选项
 8. 点击"开始转换"
+
+## 项目结构
+
+```text
+m3u8ToMp4/
+├─ app/                 # 核心业务逻辑与 UI
+├─ assets/screenshots/  # README 与发布截图
+├─ docs/releases/       # 版本发布说明（长版/短版）
+├─ scripts/             # 打包与自测脚本
+├─ tests/               # 单元测试
+├─ artifacts/release/   # 打包主产物目录（推荐分发）
+├─ release/             # 兼容镜像目录（过渡保留）
+├─ main.py              # 程序入口
+└─ README.md
+```
 
 ## 截图预览
 
@@ -382,11 +398,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_exe.ps1
 
 ### 输出位置
 - 生成的 `m3u8ToMp4.exe` 位于 `dist` 目录下
-- 会自动整理发布目录 `release`，包含以下文件：
+- 会自动整理主发布目录 `artifacts/release`，包含以下文件：
   - `m3u8ToMp4.exe`
   - `README.md`
   - 最新的 `docs/releases/RELEASE_v*.short.md`
   - `BUILD_INFO.txt`
+- 同时会同步一份兼容镜像到 `release` 目录，便于旧流程继续使用
 - 可直接双击运行，无需 Python 环境
 
 ### 发布建议（GitHub Releases）

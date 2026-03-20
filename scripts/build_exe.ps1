@@ -48,7 +48,12 @@ try {
         throw "未找到输出文件: $distExe"
     }
 
-    $releaseDir = Join-Path $projectRoot "release"
+    $artifactsRoot = Join-Path $projectRoot "artifacts"
+    if (-not (Test-Path $artifactsRoot)) {
+        New-Item -ItemType Directory -Path $artifactsRoot | Out-Null
+    }
+
+    $releaseDir = Join-Path $artifactsRoot "release"
     if (Test-Path $releaseDir) {
         Remove-Item -Path $releaseDir -Recurse -Force
     }
@@ -75,12 +80,21 @@ try {
     $buildInfo = @(
         "build_time=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
         "python=$python",
-        "exe=release\\m3u8ToMp4.exe"
+        "exe=artifacts\\release\\m3u8ToMp4.exe"
     )
     Set-Content -Path (Join-Path $releaseDir "BUILD_INFO.txt") -Value $buildInfo -Encoding UTF8
 
+    # 兼容旧目录：继续输出一份镜像，避免外部脚本立刻失效。
+    $legacyReleaseDir = Join-Path $projectRoot "release"
+    if (Test-Path $legacyReleaseDir) {
+        Remove-Item -Path $legacyReleaseDir -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $legacyReleaseDir | Out-Null
+    Copy-Item -Path (Join-Path $releaseDir "*") -Destination $legacyReleaseDir -Recurse -Force
+
     Write-Host "[完成] 打包成功：$distExe"
-    Write-Host "[完成] 发布目录已整理：$releaseDir"
+    Write-Host "[完成] 主发布目录：$releaseDir"
+    Write-Host "[完成] 兼容镜像目录：$legacyReleaseDir"
     exit 0
 }
 catch {
