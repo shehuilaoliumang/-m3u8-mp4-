@@ -18,9 +18,10 @@ class ResumeRecord:
 class ResumeStore:
     """任务级断点记录：用于批量转换时跳过已完成项。"""
 
-    def __init__(self, output_dir: Path) -> None:
+    def __init__(self, output_dir: Path, persist_to_disk: bool = True) -> None:
         self.output_dir = output_dir
         self.file_path = output_dir / ".m3u8_to_mp4_resume.json"
+        self.persist_to_disk = persist_to_disk
         self._data = self._load()
 
     @staticmethod
@@ -77,6 +78,8 @@ class ResumeStore:
         self._save()
 
     def _load(self) -> dict[str, dict[str, str]]:
+        if not self.persist_to_disk:
+            return {}
         if not self.file_path.exists():
             return {}
         try:
@@ -86,6 +89,8 @@ class ResumeStore:
         return raw if isinstance(raw, dict) else {}
 
     def _save(self) -> None:
+        if not self.persist_to_disk:
+            return
         try:
             self.file_path.write_text(
                 json.dumps(self._data, ensure_ascii=False, indent=2),

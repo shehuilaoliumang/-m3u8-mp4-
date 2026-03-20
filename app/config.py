@@ -42,6 +42,7 @@ class AppConfig:
     custom_audio_bitrate: str = ""
     custom_templates_json: str = "{}"
     enable_resume: bool = True
+    persist_resume_json: bool = True
     enable_sound_notify: bool = False
     cleanup_preview_temp_on_exit: bool = True
     max_workers: str = "1"

@@ -99,6 +99,7 @@ class ConverterApp(ttk.Frame):
         self.custom_audio_sample_rate_var = tk.StringVar(value=self.config_model.custom_audio_sample_rate)
         self.custom_audio_bitrate_var = tk.StringVar(value=self.config_model.custom_audio_bitrate)
         self.enable_resume_var = tk.BooleanVar(value=self.config_model.enable_resume)
+        self.persist_resume_json_var = tk.BooleanVar(value=self.config_model.persist_resume_json)
         self.enable_sound_notify_var = tk.BooleanVar(value=self.config_model.enable_sound_notify)
         self.cleanup_preview_temp_on_exit_var = tk.BooleanVar(value=self.config_model.cleanup_preview_temp_on_exit)
         self.max_workers_var = tk.StringVar(value=self.config_model.max_workers or "1")
@@ -545,6 +546,11 @@ class ConverterApp(ttk.Frame):
         settings_menu.add_checkbutton(
             label="会话结束自动清理临时预览文件",
             variable=self.cleanup_preview_temp_on_exit_var,
+            command=self._save_config,
+        )
+        settings_menu.add_checkbutton(
+            label="断点续传写入 JSON（输出目录）",
+            variable=self.persist_resume_json_var,
             command=self._save_config,
         )
         settings_menu.add_separator()
@@ -2463,6 +2469,7 @@ class ConverterApp(ttk.Frame):
         self.custom_audio_sample_rate_var.set(self.config_model.custom_audio_sample_rate)
         self.custom_audio_bitrate_var.set(self.config_model.custom_audio_bitrate)
         self.enable_resume_var.set(self.config_model.enable_resume)
+        self.persist_resume_json_var.set(self.config_model.persist_resume_json)
         self.enable_sound_notify_var.set(self.config_model.enable_sound_notify)
         self.cleanup_preview_temp_on_exit_var.set(self.config_model.cleanup_preview_temp_on_exit)
         self.max_workers_var.set(self.config_model.max_workers or "1")
@@ -3364,6 +3371,7 @@ class ConverterApp(ttk.Frame):
                 decrypt_options,
                 transcode_options,
                 self.enable_resume_var.get(),
+                self.persist_resume_json_var.get(),
             ),
             daemon=True,
         )
@@ -3385,6 +3393,7 @@ class ConverterApp(ttk.Frame):
         decrypt_options: DecryptOptions,
         transcode_options: TranscodeOptions,
         resume_enabled: bool,
+        persist_resume_json: bool,
     ) -> None:
         total = len(sources)
         preset = self._preset_value(self.preset_var.get())
@@ -3393,7 +3402,11 @@ class ConverterApp(ttk.Frame):
         continue_on_error = self.continue_on_error_var.get()
         failed_items: list[str] = []
         cleanup_verify_issues: list[str] = []
-        resume_store = ResumeStore(Path(output_dir)) if resume_enabled else None
+        resume_store = (
+            ResumeStore(Path(output_dir), persist_to_disk=persist_resume_json)
+            if resume_enabled
+            else None
+        )
         resume_lock = threading.Lock()
         parent_remaining_lock = threading.Lock()
         cleanup_verify_lock = threading.Lock()
@@ -3761,6 +3774,7 @@ class ConverterApp(ttk.Frame):
             custom_audio_bitrate=self.custom_audio_bitrate_var.get().strip(),
             custom_templates_json=self._templates_to_json(),
             enable_resume=self.enable_resume_var.get(),
+            persist_resume_json=self.persist_resume_json_var.get(),
             enable_sound_notify=self.enable_sound_notify_var.get(),
             cleanup_preview_temp_on_exit=self.cleanup_preview_temp_on_exit_var.get(),
             max_workers=self.max_workers_var.get().strip() or "1",
