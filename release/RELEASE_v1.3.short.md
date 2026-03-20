@@ -1,0 +1,18 @@
+# v1.3 更新速览
+
+- 强化转换后清理能力：删除范围可配置，减少目录残留。
+- 新增清理阶段独立进度反馈，转换/清理状态更清晰。
+- 优化 UI 交互与流程提示，提升可理解性。
+- 改进 Windows 打包脚本体验，便于快速生成 EXE。
+- 同步更新主界面截图与文档引用到 `assets/screenshots/1.3/main-window.png`。
+
+## 详细说明
+
+- 完整更新日志：[`RELEASE_v1.3.md`](./RELEASE_v1.3.md)
+- GitHub 网页查看：`https://github.com/shehuilaoliumang/-m3u8-mp4-/blob/main/docs/releases/RELEASE_v1.3.md`
+
+## 升级建议
+
+- 升级后先在“设置”中确认删除策略与删除范围。
+- 建议先用小样本任务验证“转换 + 清理”链路。
+
