@@ -127,15 +127,15 @@ python main.py
 
 ### 主界面
 
-![主界面预览](assets/screenshots/1.3/main-window.png)
+![主界面预览](../assets/screenshots/1.3/main-window.png)
 
 ### 设置 - 依赖中心
 
-![依赖中心预览](assets/screenshots/settings-deps.png)
+![依赖中心预览](../assets/screenshots/settings-deps.png)
 
 ### 转换任务预览
 
-![任务预览](assets/screenshots/task-preview.png)
+![任务预览](../assets/screenshots/task-preview.png)
 
 ---
 
