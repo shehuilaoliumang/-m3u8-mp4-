@@ -127,7 +127,7 @@ python main.py
 
 ### 主界面
 
-![主界面预览](assets/screenshots/v1.2/main-window.png)
+![主界面预览](assets/screenshots/1.3/main-window.png)
 
 ### 设置 - 依赖中心
 
